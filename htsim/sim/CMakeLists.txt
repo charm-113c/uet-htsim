@@ -8,8 +8,15 @@ option(ENABLE_TESTS "enable the test suite" OFF)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF) # Ensures GNU extensions are disabled
-set(CMAKE_CXX_FLAGS_RELEASE -O3) # Prevent -DNDEBUG, htsim requires 
-                                 # asserts to be enabled.
+set(CMAKE_CXX_FLAGS_RELEASE -O3) # Prevent -DNDEBUG, htsim requires
+# asserts to be enabled.
+
+# For development in Nixos (when running cmake, set flag -DCMAKE_EXPORT_COMPILE_COMMANDS=1)
+if(CMAKE_EXPORT_COMPILE_COMMANDS)
+  set(CMAKE_CXX_STANDARD_INCLUDE_DIRECTORIES
+      ${CMAKE_CXX_IMPLICIT_INCLUDE_DIRECTORIES})
+endif()
+
 # Set compiler flags
 add_compile_options(
     -Wall
@@ -22,23 +29,23 @@ add_compile_options(
 # Optionally enable sanitizers
 # -fsanitize=address -fno-omit-frame-pointer -fsanitize=undefined"
 
-if ( ENABLE_TESTS ) 
-    # Fetch GoogleTest
-    FetchContent_Declare(
+if ( ENABLE_TESTS )
+  # Fetch GoogleTest
+  FetchContent_Declare(
     googletest
     GIT_REPOSITORY https://github.com/google/googletest.git
     GIT_TAG v1.15.2
     )
-    FetchContent_MakeAvailable(googletest)
-    include(GoogleTest)
-    enable_testing()
+  FetchContent_MakeAvailable(googletest)
+  include(GoogleTest)
+  enable_testing()
 endif()
 
-# Function to add a symlink creation step for an executable. 
-# Used to create a symlink in the source directory to the executable 
+# Function to add a symlink creation step for an executable.
+# Used to create a symlink in the source directory to the executable
 # in the build directory for easier access and backward compatibility.
 function(add_symlink_target EXECUTABLE TARGET_DIR)
-    add_custom_command(
+  add_custom_command(
         TARGET ${EXECUTABLE}
         POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E remove ${TARGET_DIR}/${EXECUTABLE} # Remove existing symlink
@@ -134,19 +141,19 @@ add_executable(parse_output parse_output.cpp)
 target_link_libraries(parse_output PRIVATE htsim)
 
 if ( ENABLE_TESTS )
-    # Unit tests.
-    set(UNIT_TEST_FILES
+  # Unit tests.
+  set(UNIT_TEST_FILES
         pipe_test
     )
 
-    foreach(UNIT_TEST_FILE ${UNIT_TEST_FILES}) 
-        add_executable(${UNIT_TEST_FILE} ${UNIT_TEST_FILE}.cpp)
-        target_link_libraries(${UNIT_TEST_FILE} PRIVATE htsim gtest_main gmock_main)
-        gtest_discover_tests(${UNIT_TEST_FILE}
+  foreach(UNIT_TEST_FILE ${UNIT_TEST_FILES})
+    add_executable(${UNIT_TEST_FILE} ${UNIT_TEST_FILE}.cpp)
+    target_link_libraries(${UNIT_TEST_FILE} PRIVATE htsim gtest_main gmock_main)
+    gtest_discover_tests(${UNIT_TEST_FILE}
             PROPERTIES LABELS "unit"
             PROPERTIES TIMEOUT 60
         )
-    endforeach()
+  endforeach()
 endif()
 
 # Always print ENABLE_TESTS status, so folks don't miss it.

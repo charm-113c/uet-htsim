@@ -18,8 +18,8 @@ set(LIB_SOURCES
 
 # Create static library
 add_library(htsim_dc STATIC ${LIB_SOURCES})
-target_include_directories(htsim_dc PUBLIC ${PROJECT_SOURCE_DIR}) 
-target_include_directories(htsim_dc PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}) 
+target_include_directories(htsim_dc PUBLIC ${PROJECT_SOURCE_DIR})
+target_include_directories(htsim_dc PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
 # -------------------------------
 # Executable Definitions
@@ -29,7 +29,7 @@ add_executable(htsim_tcp main_tcp.cpp)
 set_property(TARGET htsim_tcp PROPERTY EXCLUDE_FROM_ALL TRUE)
 
 add_executable(htsim_ndp main_ndp.cpp)
-set_property(TARGET htsim_ndp PROPERTY EXCLUDE_FROM_ALL TRUE)
+# set_property(TARGET htsim_ndp PROPERTY EXCLUDE_FROM_ALL TRUE)
 
 # Standard build (no DRAGONFLY_PLUS)
 add_executable(htsim_roce_ft main_roce.cpp)
@@ -67,10 +67,10 @@ set (ALL_EXECUTABLES
     htsim_uec
 )
 foreach(EXECUTABLE ${ALL_EXECUTABLES})
-    # Link each executable with the 'htsim' library defined in the parent directory.
-    target_link_libraries(${EXECUTABLE} PRIVATE htsim_dc)
-    target_link_libraries(${EXECUTABLE} PRIVATE htsim)
-    # Add a post-build command to explicitly remove and recreate the symlink for all previous executables.
-    add_symlink_target(${EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR})
+  # Link each executable with the 'htsim' library defined in the parent directory.
+  target_link_libraries(${EXECUTABLE} PRIVATE htsim_dc)
+  target_link_libraries(${EXECUTABLE} PRIVATE htsim)
+  # Add a post-build command to explicitly remove and recreate the symlink for all previous executables.
+  add_symlink_target(${EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR})
 endforeach()
 
