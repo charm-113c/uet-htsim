@@ -69,10 +69,9 @@ public:
     // Note: in a 2D torus switches have 4 neighbours, so we associate an h_pipe and a v_pipe to
     // each so that every switch is connected to 4 others
 
-    //! Queues themselves don't need the separation, merely keeping convention for clarity and
-    //! consistency
-    vector<vector<vector<Queue*>>> _horizontal_queues;
-    vector<vector<vector<Queue*>>> _vertical_queues;
+    //! Every switch is associated an ingress and an egress queue
+    vector<vector<Queue*>> _ingress_queue;
+    vector<vector<Queue*>> _egress_queue;
 
     TwoDimensionalTorusTopology(EventList* eventlist,
                                 Logfile* logfile,
@@ -111,4 +110,4 @@ private:
     uint32_t _altitude_in_m;
 };
 
-#endif
+#endif  //! TWO_DIMENSIONAL_TORUS
