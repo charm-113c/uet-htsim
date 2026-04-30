@@ -1,19 +1,16 @@
 // -*- c-basic-offset: 4; indent-tabs-mode: nil -*-
 #ifndef TWO_DIMENSIONAL_TORUS
 #define TWO_DIMENSIONAL_TORUS
+#include <cmath>
 #include <cstdint>
-#include <memory>
-#include <ostream>
 #include <vector>
+#include "2d_torus_switch.h"
 #include "config.h"
 #include "eventlist.h"
-#include "firstfit.h"
 #include "logfile.h"
 #include "loggers.h"
-#include "main.h"
-#include "network.h"
+#include "loggertypes.h"
 #include "pipe.h"
-#include "randomqueue.h"
 #include "route.h"
 #include "switch.h"
 #include "topology.h"
@@ -38,8 +35,7 @@ typedef enum {
     AEOLUS,
     AEOLUS_ECN
 } queue_type;
-typedef enum { UPLINK, DOWNLINK } link_direction;
-#endif
+#endif  //! QT
 
 /**
  * In a 2D torus topology, we may visualise switches/nodes as being on an n*m grid.
@@ -58,9 +54,13 @@ class TwoDimensionalTorusTopology : public Topology {
 public:
     EventList* _eventlist;
     Logfile* _logfile;
+    QueueLoggerFactory* _q_logger_factory;
 
     //! 2D vector of switches
     vector<vector<Switch*>> _switches;
+    //! Every switch is associated an ingress and an egress queue
+    vector<vector<Queue*>> _ingress_queue;
+    vector<vector<Queue*>> _egress_queue;
     //! Separation between horizontal and vertical Pipes needed to simulate inter-satellite links
     //! 3D vector for Pipe: first 2D correspond to associated switch, 3rd dimension represents the
     //! virtual channels
@@ -69,20 +69,27 @@ public:
     // Note: in a 2D torus switches have 4 neighbours, so we associate an h_pipe and a v_pipe to
     // each so that every switch is connected to 4 others
 
-    //! Every switch is associated an ingress and an egress queue
-    vector<vector<Queue*>> _ingress_queue;
-    vector<vector<Queue*>> _egress_queue;
-
-    TwoDimensionalTorusTopology(EventList* eventlist,
-                                Logfile* logfile,
+    //! Minimal constructor to set defaults, used to not bloat full constructor
+    TwoDimensionalTorusTopology(Logfile* logfile,
+                                QueueLoggerFactory* q_log_factory,
                                 uint32_t n,
                                 uint32_t m,
+                                bool is_constellation);
+
+    TwoDimensionalTorusTopology(Logfile* logfile,
+                                QueueLoggerFactory* q_log_factory,
+                                uint32_t n,
+                                uint32_t m,
+                                uint32_t n_virtual_channels,
                                 queue_type queue_type,
                                 mem_b queue_size,
                                 linkspeed_bps linkspeed,
+                                torus_routing_strategy routing_strategy,
                                 bool is_constellation,
                                 simtime_picosec latency,
-                                uint32_t altitude);
+                                uint32_t altitude,
+                                float_t inclination);
+
     ~TwoDimensionalTorusTopology();  // TODO: check if needed
 
     virtual vector<const Route*>* get_bidir_paths(uint32_t src, uint32_t dest, bool reverse);
@@ -94,20 +101,32 @@ public:
 private:
     //! In satellite constellation, N is the number of orbital planes and M is the number of
     //! satellite per plane
-    uint32_t _N;
-    uint32_t _M;
+    uint32_t _n;
+    uint32_t _m;
+    uint32_t _n_virtual_channels;
 
     queue_type _queue_type;
-    mem_b _queue_size;
+    mem_b _queue_size_b;
     linkspeed_bps _linkspeed_bps;
+    torus_routing_strategy _routing_strategy;
 
     bool _is_constellation;
     //! Latency is only used when *not* simulating a constellation, and thus can be considered
     //! constant
     simtime_picosec _latency;
-    //! If simulating a constellation, shell altitude allows calculating latency between
-    //! nodes/satellites
+    //! If simulating a constellation, shell altitude and orbital inclination allows calculating
+    //! latency between nodes/satellites
     uint32_t _altitude_in_m;
+    float_t _inclination_in_deg;
+
+    void set_n_virtual_channels(uint32_t n_virtual_channels);
+    void set_queue_params(queue_type queue_type, mem_b queue_size);
+    void set_linkspeed(linkspeed_bps linkspeed);
+    void set_routing_strategy(torus_routing_strategy routing_strategy);
+    void set_constellation_params(uint32_t altitude, float_t inclination);
+    void set_switch_latency(simtime_picosec latency);
+
+    Queue* alloc_queue(QueueLogger* queue_logger);
 };
 
 #endif  //! TWO_DIMENSIONAL_TORUS

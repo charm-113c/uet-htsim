@@ -6,6 +6,12 @@
 #include "eventlist.h"
 #include "switch.h"
 
+typedef enum {
+
+    DIMENSION_ORDERED = 0,
+    MINIMAL_ADAPTIVE_ALG = 1,
+} torus_routing_strategy;
+
 /**
  * A class for 2D tori switches. Torus topologies have a large variety of routing algorithms, each
  * with their own strengths and weaknesses. As there isn't a single "canonical" routing strategy,
@@ -14,22 +20,20 @@
  */
 class TwoDimensionalTorusSwitch : public Switch {
 public:
-    enum routing_strategy {
-        DIMENSION_ORDERED = 0,
-        MINIMAL_ADAPTIVE_ALG = 1,
-    };
-
     EventList* _eventList;
 
-    TwoDimensionalTorusSwitch(EventList* eventlist, uint32_t id, routing_strategy routing_strategy);
+    TwoDimensionalTorusSwitch(EventList* eventlist,
+                              uint32_t id,
+                              torus_routing_strategy routing_strategy);
 
+    // TODO: introduce switch latency
     virtual void receivePacket(Packet& pkt) override;
     virtual Route* getNextHop(Packet& pkt) override;
 
 private:
     uint32_t _id;
     string _name;
-    routing_strategy _routing_strategy;
+    torus_routing_strategy _routing_strategy;
 
     static uint32_t id;
 };
