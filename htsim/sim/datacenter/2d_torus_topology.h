@@ -56,18 +56,18 @@ public:
     Logfile* _logfile;
     QueueLoggerFactory* _q_logger_factory;
 
-    //! 2D vector of switches
+    //! n*m 2D vector of switches
     vector<vector<Switch*>> _switches;
-    //! Every switch is associated an ingress and an egress queue
-    vector<vector<Queue*>> _ingress_queue;
-    vector<vector<Queue*>> _egress_queue;
-    //! Separation between horizontal and vertical Pipes needed to simulate inter-satellite links
+    //! Every switch is associated 4 outgoing queues, one per direction (N, S, W, E)
+    vector<vector<vector<Queue*>>> _egress_queues;
+    //! Incoming queues are (only) needed when using lossless input queues
+    vector<vector<vector<Queue*>>> _ingress_queues;
     //! 3D vector for Pipe: first 2D correspond to associated switch, 3rd dimension represents the
     //! virtual channels
-    vector<vector<vector<Pipe*>>> _horizontal_pipes;
-    vector<vector<vector<Pipe*>>> _vertical_pipes;
-    // Note: in a 2D torus switches have 4 neighbours, so we associate an h_pipe and a v_pipe to
-    // each so that every switch is connected to 4 others
+    vector<vector<vector<Pipe*>>> _northbound_pipes;
+    vector<vector<vector<Pipe*>>> _eastbound_pipes;
+    vector<vector<vector<Pipe*>>> _southbound_pipes;
+    vector<vector<vector<Pipe*>>> _westbound_pipes;
 
     //! Minimal constructor to set defaults, used to not bloat full constructor
     TwoDimensionalTorusTopology(Logfile* logfile,
@@ -107,6 +107,7 @@ private:
 
     queue_type _queue_type;
     mem_b _queue_size_b;
+    // TODO: divide bandwidth by n_virtual_channels where relevant
     linkspeed_bps _linkspeed_bps;
     torus_routing_strategy _routing_strategy;
 
