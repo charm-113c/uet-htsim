@@ -58,16 +58,24 @@ public:
 
     //! n*m 2D vector of switches
     vector<vector<Switch*>> _switches;
-    //! Every switch is associated 4 outgoing queues, one per direction (N, S, W, E)
-    vector<vector<vector<Queue*>>> _egress_queues;
-    //! Incoming queues are (only) needed when using lossless input queues
-    vector<vector<vector<Queue*>>> _ingress_queues;
     //! 3D vector for Pipe: first 2D correspond to associated switch, 3rd dimension represents the
     //! virtual channels
     vector<vector<vector<Pipe*>>> _northbound_pipes;
     vector<vector<vector<Pipe*>>> _eastbound_pipes;
     vector<vector<vector<Pipe*>>> _southbound_pipes;
     vector<vector<vector<Pipe*>>> _westbound_pipes;
+    //! Each pipe is preceded by its own egress queue
+    vector<vector<vector<Queue*>>> _north_egress_queues;
+    vector<vector<vector<Queue*>>> _east_egress_queues;
+    vector<vector<vector<Queue*>>> _south_egress_queues;
+    vector<vector<vector<Queue*>>> _west_egress_queues;
+    //! To each egress queue we associate the ingress queue opposite to it (although ingress queues
+    //! are only used for lossless input queues)
+    vector<vector<vector<Queue*>>> _north_ingress_queues;
+    vector<vector<vector<Queue*>>> _east_ingress_queues;
+    vector<vector<vector<Queue*>>> _south_ingress_queues;
+    vector<vector<vector<Queue*>>> _west_ingress_queues;
+    // NOTE: The order N, E, S, W is the default used throughout the topology for directions
 
     //! Minimal constructor to set defaults, used to not bloat full constructor
     TwoDimensionalTorusTopology(Logfile* logfile,

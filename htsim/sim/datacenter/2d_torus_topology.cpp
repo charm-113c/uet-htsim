@@ -1,9 +1,7 @@
 // -*- c-basic-offset: 4; indent-tabs-mode: nil -*-
 
-// Shall we start with the constructor?
 #include "2d_torus_topology.h"
 #include <cmath>
-#include <cstddef>
 #include <cstdint>
 #include <iostream>
 #include <vector>
@@ -59,26 +57,37 @@ TwoDimensionalTorusTopology::TwoDimensionalTorusTopology(Logfile* logfile,
                                                          uint32_t altitude,
                                                          float_t inclination)
     : TwoDimensionalTorusTopology(logfile, q_log_factory, n, m, is_constellation) {
-    // --- Set parameters
+    // Set parameters
+    set_routing_strategy(routing_strategy);
     set_n_virtual_channels(n_virtual_channels);
     set_queue_params(queue_type, queue_size);
     set_linkspeed(linkspeed);
-    set_routing_strategy(routing_strategy);
-
     if (is_constellation) {
         set_constellation_params(altitude, inclination);
     } else {
         set_switch_latency(latency);
     }
-    // ---
 
     // Allocating switches, queues, and pipes' vectors
-    // NOTE: resize initialises vectors with values' default type, in this case nullptr
+    // NOTE: resize() initialises vectors with values' default type, in this case nullptr
     // If things don't go right, explicitly set values to nullptr with loops here
     _switches.resize(_n, vector<Switch*>(_m));
 
-    _egress_queues.resize(_n, vector<vector<Queue*>>(_m, vector<Queue*>(4)));
-    _ingress_queues.resize(_n, vector<vector<Queue*>>(_m, vector<Queue*>(4)));
+    _north_egress_queues.resize(_n,
+                                vector<vector<Queue*>>(_m, vector<Queue*>(_n_virtual_channels)));
+    _east_egress_queues.resize(_n, vector<vector<Queue*>>(_m, vector<Queue*>(_n_virtual_channels)));
+    _south_egress_queues.resize(_n,
+                                vector<vector<Queue*>>(_m, vector<Queue*>(_n_virtual_channels)));
+    _west_egress_queues.resize(_n, vector<vector<Queue*>>(_m, vector<Queue*>(_n_virtual_channels)));
+
+    _north_ingress_queues.resize(_n,
+                                 vector<vector<Queue*>>(_m, vector<Queue*>(_n_virtual_channels)));
+    _east_ingress_queues.resize(_n,
+                                vector<vector<Queue*>>(_m, vector<Queue*>(_n_virtual_channels)));
+    _south_ingress_queues.resize(_n,
+                                 vector<vector<Queue*>>(_m, vector<Queue*>(_n_virtual_channels)));
+    _west_ingress_queues.resize(_n,
+                                vector<vector<Queue*>>(_m, vector<Queue*>(_n_virtual_channels)));
 
     _northbound_pipes.resize(_n, vector<vector<Pipe*>>(_m, vector<Pipe*>(_n_virtual_channels)));
     _eastbound_pipes.resize(_n, vector<vector<Pipe*>>(_m, vector<Pipe*>(_n_virtual_channels)));
@@ -95,144 +104,129 @@ TwoDimensionalTorusTopology::TwoDimensionalTorusTopology(Logfile* logfile,
     }
 
     // Create queues and pipes
-    QueueLogger* queue_logger;
+    QueueLogger* n_queue_logger;
+    QueueLogger* e_queue_logger;
+    QueueLogger* s_queue_logger;
+    QueueLogger* w_queue_logger;
     for (uint32_t i = 0; i < _n; i++) {
         for (uint32_t j = 0; j < _m; j++) {
-            // Init queues and their loggers
-            for (uint32_t dir = 0; dir < 4; dir++) {
-                // Start from egress queue
-                if (_q_logger_factory) {
-                    queue_logger = _q_logger_factory->createQueueLogger();
-                } else {
-                    queue_logger = nullptr;
-                }
-
-                // TODO: REWORK NEEDED
-                // Ingress queues are never used, except for the lossless input case. It's the
-                // egress queues that do the lion share of the work in this simulation.
-                // The only job of ingress queues is to store lossless input queues (something that
-                // wasn't done in the fat tree implementation, likely because the lossless input
-                // queue type was added after a first version of the fat tree was completed, and
-                // keeping track of them would require doubling the number of queue vectors, which
-                // is already significant).
-                //
-                // TODO: redo the part below, now that we actually know what we're doing.
-                // Thus, in this topology, we allocate a queue type to _egress_queues
-                // with alloc_queue, and then populate _ingress_queues with LosslessInputQueue only
-                // if such queue types are used. Otherwise, they're left as nullptr.
-
-                _egress_queues[i][j][dir] = alloc_queue(queue_logger);
-                string dir_str, opp_dir_str;
-                uint32_t opp_dir;
-                switch (dir) {
-                    case NORTH:
-                        dir_str = "North";
-                        opp_dir_str = "South";
-                        opp_dir = SOUTH;
-                        break;
-                    case EAST:
-                        dir_str = "East";
-                        opp_dir_str = "West";
-                        opp_dir = WEST;
-                        break;
-                    case SOUTH:
-                        dir_str = "South";
-                        opp_dir_str = "North";
-                        opp_dir = NORTH;
-                        break;
-                    case WEST:
-                        dir_str = "West";
-                        opp_dir_str = "East";
-                        opp_dir = EAST;
-                        break;
-                }
-                _egress_queues[i][j][dir]->setName(dir_str + "EgressQueue_(" + ntoa(i) + ", " +
-                                                   ntoa(j) + ")");
-                // NOTE: assuming 4 ports per switch; could make #ports a variable in the future
-                _switches[i][j]->addPort(_egress_queues[i][j][dir]);
-
-                // To each _egress_queues create and associate corresponding ingress queue
-                if (_q_logger_factory) {
-                    queue_logger = _q_logger_factory->createQueueLogger();
-                } else {
-                    queue_logger = nullptr;
-                }
-                // Find opposite switch's coordinates
-                uint32_t opp_i, opp_j;
-                switch (dir) {
-                    case NORTH:
-                        opp_i = (i == 0) ? _n - 1 : i - 1;
-                        opp_j = j;
-                        break;
-                    case EAST:
-                        opp_i = i;
-                        opp_j = (j == _m - 1) ? 0 : j + 1;
-                        break;
-                    case SOUTH:
-                        opp_i = (i == _n - 1) ? 0 : i + 1;
-                        opp_j = j;
-                        break;
-                    case WEST:
-                        opp_i = i;
-                        opp_j = (j == 0) ? _m - 1 : j - 1;
-                        break;
-                }
-
-                // Create opposite switch's ingress queue
-                if (_queue_type == LOSSLESS_INPUT || _queue_type == LOSSLESS_INPUT_ECN) {
-                    // Overwrite ingress queue to be lossless queue
-                    _ingress_queues[opp_i][opp_j][opp_dir] = new LosslessInputQueue(
-                        *_eventlist, _egress_queues[i][j][dir], _switches[i][j], _latency);
-                } else {
-                    _ingress_queues[opp_i][opp_j][opp_dir] = alloc_queue(queue_logger);
-                    // Set remote endpoint as switch
-                    // NOTE: may actually not be used
-                    _ingress_queues[opp_i][opp_j][opp_dir]->setRemoteEndpoint(_switches[i][j]);
-                }
-                _ingress_queues[opp_i][opp_j][opp_dir]->setName(
-                    opp_dir_str + "IngressQueue_(" + ntoa(opp_i) + ", " + ntoa(opp_j) + ")");
-                // TODO: check working of addPort, I doubt it takes both egress and ingress queues
-                // at once
-            }
-
-            // TODO: Move Pipe creation in loop above to match their respective ports/queues,
-            // consider cleaner way to handle virtual channels
-            // NOTE: Actually, we may not need to do that, this might work as is. Consider this.
-            // Create Pipes
-            for (uint32_t k = 0; k < _n_virtual_channels; k++) {
+            for (uint32_t vc = 0; vc < _n_virtual_channels; vc++) {
+                // --- Create Pipes ---
+                // TODO: Check correctness in Pipe creation
                 if (is_constellation) {
-                    _northbound_pipes[i][j][k] =
+                    _northbound_pipes[i][j][vc] =
                         new InterSatelliteLink(InterSatelliteLink::ISL_Type::INTERPLANE,
                                                _inclination_in_deg, _altitude_in_m);
-                    _eastbound_pipes[i][j][k] =
+                    _eastbound_pipes[i][j][vc] =
                         new InterSatelliteLink(InterSatelliteLink::ISL_Type::INTRAPLANE,
                                                _inclination_in_deg, _altitude_in_m);
-                    _southbound_pipes[i][j][k] =
+                    _southbound_pipes[i][j][vc] =
                         new InterSatelliteLink(InterSatelliteLink::ISL_Type::INTERPLANE,
                                                _inclination_in_deg, _altitude_in_m);
-                    _westbound_pipes[i][j][k] =
+                    _westbound_pipes[i][j][vc] =
                         new InterSatelliteLink(InterSatelliteLink::ISL_Type::INTRAPLANE,
                                                _inclination_in_deg, _altitude_in_m);
                 } else {
-                    _northbound_pipes[i][j][k] = new Pipe(_latency, *_eventlist);
-                    _eastbound_pipes[i][j][k] = new Pipe(_latency, *_eventlist);
-                    _southbound_pipes[i][j][k] = new Pipe(_latency, *_eventlist);
-                    _westbound_pipes[i][j][k] = new Pipe(_latency, *_eventlist);
+                    _northbound_pipes[i][j][vc] = new Pipe(_latency, *_eventlist);
+                    _eastbound_pipes[i][j][vc] = new Pipe(_latency, *_eventlist);
+                    _southbound_pipes[i][j][vc] = new Pipe(_latency, *_eventlist);
+                    _westbound_pipes[i][j][vc] = new Pipe(_latency, *_eventlist);
                 }
                 // Set names
-                _northbound_pipes[i][j][k]->setName("NorthboundPipe_(" + ntoa(i) + ", " + ntoa(j) +
+                _northbound_pipes[i][j][vc]->setName("NorthboundPipe_(" + ntoa(i) + ", " + ntoa(j) +
+                                                     ")");
+                _eastbound_pipes[i][j][vc]->setName("EastboundPipe_(" + ntoa(i) + ", " + ntoa(j) +
                                                     ")");
-                _eastbound_pipes[i][j][k]->setName("EastboundPipe_(" + ntoa(i) + ", " + ntoa(j) +
-                                                   ")");
-                _southbound_pipes[i][j][k]->setName("SouthboundPipe_(" + ntoa(i) + ", " + ntoa(j) +
+                _southbound_pipes[i][j][vc]->setName("SouthboundPipe_(" + ntoa(i) + ", " + ntoa(j) +
+                                                     ")");
+                _westbound_pipes[i][j][vc]->setName("WestboundPipe_(" + ntoa(i) + ", " + ntoa(j) +
                                                     ")");
-                _westbound_pipes[i][j][k]->setName("WestboundPipe_(" + ntoa(i) + ", " + ntoa(j) +
-                                                   ")");
+                // --------------------
+
+                // --- Create Queues ---
+                // Start with egress queues
+
+                // Init queue loggers
+                n_queue_logger =
+                    (_q_logger_factory) ? _q_logger_factory->createQueueLogger() : nullptr;
+                e_queue_logger =
+                    (_q_logger_factory) ? _q_logger_factory->createQueueLogger() : nullptr;
+                s_queue_logger =
+                    (_q_logger_factory) ? _q_logger_factory->createQueueLogger() : nullptr;
+                w_queue_logger =
+                    (_q_logger_factory) ? _q_logger_factory->createQueueLogger() : nullptr;
+
+                // We allocate a queue of given type to _egress_queues with alloc_queue,
+                // and then populate _ingress_queues with LosslessInputQueue only
+                // if such queue types are used. Otherwise, ingress queues are left as nullptr.
+                // TODO: when allocating buffer size, divide by _n_virtual_channels
+                _north_egress_queues[i][j][vc] = alloc_queue(n_queue_logger);
+                _east_egress_queues[i][j][vc] = alloc_queue(e_queue_logger);
+                _south_egress_queues[i][j][vc] = alloc_queue(s_queue_logger);
+                _west_egress_queues[i][j][vc] = alloc_queue(w_queue_logger);
+
+                _north_egress_queues[i][j][vc]->setName("NorthEgressQueue_(" + ntoa(i) + ", " +
+                                                        ntoa(j) + ")");
+                _east_egress_queues[i][j][vc]->setName("EastEgressQueue_(" + ntoa(i) + ", " +
+                                                       ntoa(j) + ")");
+                _south_egress_queues[i][j][vc]->setName("SouthEgressQueue_(" + ntoa(i) + ", " +
+                                                        ntoa(j) + ")");
+                _west_egress_queues[i][j][vc]->setName("WestEgressQueue_(" + ntoa(i) + ", " +
+                                                       ntoa(j) + ")");
+                // Connect switch to these queues
+                _switches[i][j]->addPort(_north_egress_queues[i][j][vc]);
+                _switches[i][j]->addPort(_east_egress_queues[i][j][vc]);
+                _switches[i][j]->addPort(_south_egress_queues[i][j][vc]);
+                _switches[i][j]->addPort(_west_egress_queues[i][j][vc]);
+
+                if (_queue_type == LOSSLESS_INPUT || _queue_type == LOSSLESS_INPUT_ECN) {
+                    // Create an ingress queue for the switch opposite to appropriate egress switch
+                    // E.g.: to NorthEgressQueue associate opposite Switch's SouthIngressQueue
+                    // So determine coords of opposite switch
+                    uint32_t n_i, n_j, e_i, e_j, s_i, s_j, w_i, w_j;
+                    // Simulate wrap-around when network edge is reached
+                    n_i = (i == 0) ? _n - 1 : i - 1;
+                    n_j = j;
+                    _north_ingress_queues[n_i][n_j][vc] = new LosslessInputQueue(
+                        *_eventlist, _south_egress_queues[i][j][vc], _switches[n_i][n_j], _latency);
+                    _north_ingress_queues[n_i][n_j][vc]->setName("NorthIngressQueue_(" + ntoa(n_i) +
+                                                                 ", " + ntoa(n_j) + ")");
+                    e_i = i;
+                    e_j = (j == _m - 1) ? 0 : j + 1;
+                    _east_ingress_queues[e_i][e_j][vc] = new LosslessInputQueue(
+                        *_eventlist, _west_egress_queues[i][j][vc], _switches[e_i][e_j], _latency);
+                    _east_ingress_queues[e_i][e_j][vc]->setName("EastIngressQueue_(" + ntoa(e_i) +
+                                                                ", " + ntoa(e_j) + ")");
+                    s_i = (i == _n - 1) ? 0 : i + 1;
+                    s_j = j;
+                    _south_ingress_queues[s_i][s_j][vc] = new LosslessInputQueue(
+                        *_eventlist, _north_egress_queues[i][j][vc], _switches[s_i][s_j], _latency);
+                    _south_ingress_queues[s_i][s_j][vc]->setName("SouthIngressQueue_(" + ntoa(s_i) +
+                                                                 ", " + ntoa(s_j) + ")");
+                    w_i = i;
+                    w_j = (j == 0) ? _m - 1 : j - 1;
+                    _west_ingress_queues[w_i][w_j][vc] = new LosslessInputQueue(
+                        *_eventlist, _east_egress_queues[i][j][vc], _switches[w_i][w_j], _latency);
+                    _west_ingress_queues[w_i][w_j][vc]->setName("WestIngressQueue_(" + ntoa(w_i) +
+                                                                ", " + ntoa(w_j) + ")");
+                } else {
+                    // Do nothing.
+                    // Ingress queues are never used, except for the lossless input case.
+                    // Egress queues do the heavy lifting during simulations.
+                    // The only job of ingress queues is to store lossless input queues; something
+                    // that wasn't done in the fat tree implementation, likely because the lossless
+                    // input queue type was added after a first version of the fat tree was
+                    // completed, and keeping track of the needed ingress queues would require
+                    // doubling the number of queue vectors, which is already significant in fat
+                    // tree. That would explain the blatant memory leak.
+                    // In our case, keeping track of ingress queues is easy so we do it.
+                }
+
+                // --------------------
             }
 
             // TODO: Deal with logging, is it automatic for Switches and Pipes or is a manual setup
             // needed?
-            // TODO: Connect switches, queues and pipes
             // NOTE: Pipes are "connected" upon route creation, see get_bidir_paths of fat tree
         }
     }
@@ -260,29 +254,46 @@ TwoDimensionalTorusTopology::~TwoDimensionalTorusTopology() {
     }
     _switches.clear();
 
-    delete_3d_vector(_egress_queues);
-    delete_3d_vector(_ingress_queues);
+    delete_3d_vector(_north_egress_queues);
+    delete_3d_vector(_east_egress_queues);
+    delete_3d_vector(_south_egress_queues);
+    delete_3d_vector(_west_egress_queues);
+
+    delete_3d_vector(_north_ingress_queues);
+    delete_3d_vector(_east_ingress_queues);
+    delete_3d_vector(_south_ingress_queues);
+    delete_3d_vector(_west_ingress_queues);
+
     delete_3d_vector(_northbound_pipes);
     delete_3d_vector(_westbound_pipes);
     delete_3d_vector(_southbound_pipes);
     delete_3d_vector(_eastbound_pipes);
 }
 
+void TwoDimensionalTorusTopology::set_routing_strategy(torus_routing_strategy rs) {
+    _routing_strategy = rs;
+}
+
 void TwoDimensionalTorusTopology::set_n_virtual_channels(uint32_t n) {
-    n == 0 ? _n_virtual_channels = 2 : _n_virtual_channels = n;
+    if (_routing_strategy == DIMENSION_ORDERED) {
+        // In this case do not use virtual channels
+        _n_virtual_channels = 1;
+    } else {  // MINIMAL_ADAPTIVE_ALG needs at least 2 VCs
+        _n_virtual_channels = (n < 2) ? 2 : n;
+    }
 }
 
 void TwoDimensionalTorusTopology::set_queue_params(queue_type qt, mem_b qs) {
-    qt ? _queue_type = qt : _queue_type = LOSSLESS;
     // TODO: find out more about queue size, since in here they set mysterious numbers like 8, or 7.
     // Furthermore, it appears that both in Infiniband and UEC, the focus is on a credit-based flow,
     // meaning buffer size is of low relevance, as senders must wait for buffer space to be
     // available
+    _queue_type = (qt) ? qt : LOSSLESS;
 }
 
 void TwoDimensionalTorusTopology::set_linkspeed(linkspeed_bps ls) {
     //! Default to 100Gbps
-    ls == 0 ? _linkspeed_bps = 100000000000 : _linkspeed_bps = ls;
+    _linkspeed_bps = (ls == 0) ? 100000000000 : ls;
 }
 
 void TwoDimensionalTorusTopology::set_constellation_params(uint32_t altitude, float_t inclination) {
@@ -303,10 +314,6 @@ void TwoDimensionalTorusTopology::set_constellation_params(uint32_t altitude, fl
 
 void TwoDimensionalTorusTopology::set_switch_latency(simtime_picosec latency) {
     _latency = latency;
-}
-
-void TwoDimensionalTorusTopology::set_routing_strategy(torus_routing_strategy rs) {
-    _routing_strategy = rs;
 }
 
 Queue* TwoDimensionalTorusTopology::alloc_queue(QueueLogger* queue_logger) {

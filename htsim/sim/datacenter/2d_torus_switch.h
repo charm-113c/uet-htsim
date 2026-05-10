@@ -7,7 +7,6 @@
 #include "switch.h"
 
 typedef enum {
-
     DIMENSION_ORDERED = 0,
     MINIMAL_ADAPTIVE_ALG = 1,
 } torus_routing_strategy;
