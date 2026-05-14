@@ -4,16 +4,24 @@
 #include <cmath>
 #include <cstdint>
 #include <iostream>
+#include <stdexcept>
 #include <vector>
 #include "2d_torus_switch.h"
+#include "compositequeue.h"
 #include "config.h"
+#include "ecnqueue.h"
 #include "eventlist.h"
 #include "inter_satellite_link.h"
 #include "logfile.h"
 #include "loggers.h"
 #include "loggertypes.h"
+#include "main.h"
+#include "prioqueue.h"
 #include "queue.h"
+#include "queue_lossless.h"
 #include "queue_lossless_input.h"
+#include "queue_lossless_output.h"
+#include "randomqueue.h"
 #include "switch.h"
 
 #define NORTH 0
@@ -33,8 +41,9 @@ TwoDimensionalTorusTopology::TwoDimensionalTorusTopology(Logfile* logfile,
       _n(n),
       _m(m),
       _n_virtual_channels(0),
-      _queue_type(queue_type::FAIR_PRIO),
+      _queue_type(UNDEFINED),
       _queue_size_b(0),
+      _composite_q_cfg(),
       _linkspeed_bps(0),
       _routing_strategy(MINIMAL_ADAPTIVE_ALG),
       _is_constellation(is_constellation),
@@ -51,6 +60,10 @@ TwoDimensionalTorusTopology::TwoDimensionalTorusTopology(Logfile* logfile,
                                                          queue_type queue_type,
                                                          mem_b queue_size,
                                                          linkspeed_bps linkspeed,
+                                                         bool disable_trim,
+                                                         uint16_t trim_size,
+                                                         mem_b ecn_high,
+                                                         mem_b ecn_low,
                                                          torus_routing_strategy routing_strategy,
                                                          bool is_constellation,
                                                          simtime_picosec latency,
@@ -60,7 +73,7 @@ TwoDimensionalTorusTopology::TwoDimensionalTorusTopology(Logfile* logfile,
     // Set parameters
     set_routing_strategy(routing_strategy);
     set_n_virtual_channels(n_virtual_channels);
-    set_queue_params(queue_type, queue_size);
+    set_queue_params(queue_type, queue_size, disable_trim, trim_size, ecn_high, ecn_low);
     set_linkspeed(linkspeed);
     if (is_constellation) {
         set_constellation_params(altitude, inclination);
@@ -160,10 +173,18 @@ TwoDimensionalTorusTopology::TwoDimensionalTorusTopology(Logfile* logfile,
                 // and then populate _ingress_queues with LosslessInputQueue only
                 // if such queue types are used. Otherwise, ingress queues are left as nullptr.
                 // TODO: when allocating buffer size, divide by _n_virtual_channels
-                _north_egress_queues[i][j][vc] = alloc_queue(n_queue_logger);
-                _east_egress_queues[i][j][vc] = alloc_queue(e_queue_logger);
-                _south_egress_queues[i][j][vc] = alloc_queue(s_queue_logger);
-                _west_egress_queues[i][j][vc] = alloc_queue(w_queue_logger);
+                _north_egress_queues[i][j][vc] =
+                    alloc_queue(n_queue_logger, _linkspeed_bps / _n_virtual_channels,
+                                _queue_size_b / _n_virtual_channels);
+                _east_egress_queues[i][j][vc] =
+                    alloc_queue(e_queue_logger, _linkspeed_bps / _n_virtual_channels,
+                                _queue_size_b / _n_virtual_channels);
+                _south_egress_queues[i][j][vc] =
+                    alloc_queue(s_queue_logger, _linkspeed_bps / _n_virtual_channels,
+                                _queue_size_b / _n_virtual_channels);
+                _west_egress_queues[i][j][vc] =
+                    alloc_queue(w_queue_logger, _linkspeed_bps / _n_virtual_channels,
+                                _queue_size_b / _n_virtual_channels);
 
                 _north_egress_queues[i][j][vc]->setName("NorthEgressQueue_(" + ntoa(i) + ", " +
                                                         ntoa(j) + ")");
@@ -283,17 +304,26 @@ void TwoDimensionalTorusTopology::set_n_virtual_channels(uint32_t n) {
     }
 }
 
-void TwoDimensionalTorusTopology::set_queue_params(queue_type qt, mem_b qs) {
-    // TODO: find out more about queue size, since in here they set mysterious numbers like 8, or 7.
-    // Furthermore, it appears that both in Infiniband and UEC, the focus is on a credit-based flow,
-    // meaning buffer size is of low relevance, as senders must wait for buffer space to be
-    // available
-    _queue_type = (qt) ? qt : LOSSLESS;
+void TwoDimensionalTorusTopology::set_queue_params(queue_type queue_type,
+                                                   mem_b queue_size,
+                                                   bool disable_trim,
+                                                   uint16_t trim_size,
+                                                   mem_b ecn_high,
+                                                   mem_b ecn_low) {
+    // Default to lossless
+    _queue_type = (queue_type == UNDEFINED) ? LOSSLESS : queue_type;
+    // Default to accomodating 1 packet per virtual channel
+    _queue_size_b = (queue_size == 0) ? memFromPkt(_n_virtual_channels) : queue_size;
+
+    if (_queue_type == COMPOSITE || _queue_type == COMPOSITE_ECN) {
+        ecn_low = (ecn_low == 0) ? ecn_high : ecn_low;
+        _composite_q_cfg = composite_q_cfg{disable_trim, trim_size, ecn_high, ecn_low};
+    }
 }
 
 void TwoDimensionalTorusTopology::set_linkspeed(linkspeed_bps ls) {
     //! Default to 100Gbps
-    _linkspeed_bps = (ls == 0) ? 100000000000 : ls;
+    _linkspeed_bps = (ls == 0) ? speedFromGbps(100) : ls;
 }
 
 void TwoDimensionalTorusTopology::set_constellation_params(uint32_t altitude, float_t inclination) {
@@ -316,7 +346,61 @@ void TwoDimensionalTorusTopology::set_switch_latency(simtime_picosec latency) {
     _latency = latency;
 }
 
-Queue* TwoDimensionalTorusTopology::alloc_queue(QueueLogger* queue_logger) {
-    // TODO: figure out which queues fit our use case and implement only those
-    return nullptr;
+Queue* TwoDimensionalTorusTopology::alloc_queue(QueueLogger* queue_logger,
+                                                linkspeed_bps linkspeed_bps,
+                                                mem_b queue_size) {
+    switch (_queue_type) {
+        case RANDOM:
+            // Simple queue that randomly decides whether to drop packet when above a given
+            // threshold (set through RANDOM_BUFFER), and drops incoming packet when full
+            return new RandomQueue(linkspeed_bps, queue_size, *_eventlist, queue_logger,
+                                   memFromPkt(RANDOM_BUFFER));
+        case ECN:
+            // Explicit Congestion Notification, sends pause frames to signal when buffer is full,
+            // but drops incoming packet
+            return new ECNQueue(linkspeed_bps, queue_size, *_eventlist, queue_logger,
+                                memFromPkt(15));
+        case LOSSLESS:
+            // Sets a threshold below max size, and when reached sends a pause frame back to sender
+            // until ready to receive again. If it receives a pause frame, it waits until sender is
+            // ready to receive again
+            return new LosslessQueue(linkspeed_bps, queue_size, *_eventlist, queue_logger, nullptr);
+        case LOSSLESS_INPUT:
+            // We need to pair this queue to a LosslessInputQueue we'll create, so actually return
+            // LosslessOutputQueue. Only input queues can send pause frame, output queues must wait
+            return new LosslessOutputQueue(linkspeed_bps, queue_size, *_eventlist, queue_logger);
+        case LOSSLESS_INPUT_ECN:
+            // Emulate (actually lossless) ECN by having virtually inexhaustible buffer size
+            return new LosslessOutputQueue(linkspeed_bps, memFromPkt(10000), *_eventlist,
+                                           queue_logger);
+        case CTRL_PRIO:
+            // Queue that sets packets as high or low priority, but I'm unsure of its workings, what
+            // it's supposed to do uniquely
+            return new CtrlPrioQueue(linkspeed_bps, queue_size, *_eventlist, queue_logger);
+        case COMPOSITE:
+            // Complex queue type: contains high and low priority buffers, with weighted round
+            // robin that heavily prioritises high priority packets. Can use ECN on low priority
+            // queue. When that queue is full, can trim packets down to header and put them in high
+            // priority queue, or drop them entirely if not trimming.
+
+            //! _trim_size is size packet is trimmed down to, i.e. header's size
+            //! _ecn_threshold is size starting which ECN is triggered
+            //! _ecn_low and _ecn_high are respectively soft and hard thresholds: if queue_size
+            //! exceeds _ecn_high, ECN is triggered. Else, if only exceedes low, then ECN is
+            //! triggered only with a given probability proportional to fullness of queue. Setting
+            //! single threshold means _ecn_high == _ecn_low
+            return new CompositeQueue(linkspeed_bps, queue_size, *_eventlist, queue_logger,
+                                      _composite_q_cfg.trim_size, _composite_q_cfg.disable_trim);
+        case COMPOSITE_ECN: {
+            CompositeQueue* q =
+                new CompositeQueue(linkspeed_bps, queue_size, *_eventlist, queue_logger,
+                                   _composite_q_cfg.trim_size, _composite_q_cfg.disable_trim);
+            q->set_ecn_thresholds(_composite_q_cfg.ecn_min_threshold,
+                                  _composite_q_cfg.ecn_max_threshold);
+            return q;
+        }
+        default:
+            throw runtime_error(
+                "Error allocating queue: queue type is invalid or hasn't been implemented");
+    }
 }

@@ -37,6 +37,15 @@ typedef enum {
 } queue_type;
 #endif  //! QT
 
+typedef struct {
+    bool disable_trim;
+    uint16_t trim_size;
+
+    // ECN
+    mem_b ecn_min_threshold;
+    mem_b ecn_max_threshold;
+} composite_q_cfg;
+
 /**
  * In a 2D torus topology, we may visualise switches/nodes as being on an n*m grid.
  * Every switch is connected to its four neighbours to the left, right, up and down. Switches at the
@@ -92,13 +101,17 @@ public:
                                 queue_type queue_type,
                                 mem_b queue_size,
                                 linkspeed_bps linkspeed,
+                                bool disable_trim,
+                                uint16_t trim_size,
+                                mem_b ecn_high,
+                                mem_b ecn_low,
                                 torus_routing_strategy routing_strategy,
                                 bool is_constellation,
                                 simtime_picosec latency,
                                 uint32_t altitude,
                                 float_t inclination);
 
-    ~TwoDimensionalTorusTopology();  // TODO: check if needed
+    ~TwoDimensionalTorusTopology();
 
     virtual vector<const Route*>* get_bidir_paths(uint32_t src, uint32_t dest, bool reverse);
     virtual vector<uint32_t>* get_neighbours(uint32_t src);
@@ -115,6 +128,8 @@ private:
 
     queue_type _queue_type;
     mem_b _queue_size_b;
+    composite_q_cfg _composite_q_cfg;
+
     // TODO: divide bandwidth by n_virtual_channels where relevant
     linkspeed_bps _linkspeed_bps;
     torus_routing_strategy _routing_strategy;
@@ -129,13 +144,18 @@ private:
     float_t _inclination_in_deg;
 
     void set_n_virtual_channels(uint32_t n_virtual_channels);
-    void set_queue_params(queue_type queue_type, mem_b queue_size);
+    void set_queue_params(queue_type queue_type,
+                          mem_b queue_size,
+                          bool disable_trim,
+                          uint16_t trim_size,
+                          mem_b ecn_high,
+                          mem_b ecn_low);
     void set_linkspeed(linkspeed_bps linkspeed);
     void set_routing_strategy(torus_routing_strategy routing_strategy);
     void set_constellation_params(uint32_t altitude, float_t inclination);
     void set_switch_latency(simtime_picosec latency);
 
-    Queue* alloc_queue(QueueLogger* queue_logger);
+    Queue* alloc_queue(QueueLogger* queue_logger, linkspeed_bps linkspeed_bps, mem_b queue_size);
 };
 
 #endif  //! TWO_DIMENSIONAL_TORUS
