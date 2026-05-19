@@ -21,6 +21,7 @@ class TwoDimensionalTorusSwitch : public Switch {
 public:
     EventList* _eventList;
 
+    // TODO: Don't forget to call Switch constructor with appropriate parameters if necessary
     TwoDimensionalTorusSwitch(EventList* eventlist,
                               uint32_t id,
                               torus_routing_strategy routing_strategy);
@@ -30,8 +31,10 @@ public:
     virtual Route* getNextHop(Packet& pkt) override;
 
 private:
+    // TODO: will we be needing the _id property? Coords should do the job.
     uint32_t _id;
     string _name;
+
     torus_routing_strategy _routing_strategy;
 
     static uint32_t id;

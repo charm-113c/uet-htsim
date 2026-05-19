@@ -16,18 +16,25 @@
 #include "loggers.h"
 #include "loggertypes.h"
 #include "main.h"
+#include "network.h"
 #include "prioqueue.h"
 #include "queue.h"
 #include "queue_lossless.h"
 #include "queue_lossless_input.h"
 #include "queue_lossless_output.h"
 #include "randomqueue.h"
+#include "route.h"
 #include "switch.h"
 
 #define NORTH 0
 #define EAST 1
 #define SOUTH 2
 #define WEST 3
+
+// Define virtual channels 0 and 1
+// NOTE: constructor ensures those two must exist, although there may be more
+#define VC0 0
+#define VC1 1
 
 //! Minimal constructor used to set default parameters
 TwoDimensionalTorusTopology::TwoDimensionalTorusTopology(Logfile* logfile,
@@ -45,7 +52,7 @@ TwoDimensionalTorusTopology::TwoDimensionalTorusTopology(Logfile* logfile,
       _queue_size_b(0),
       _composite_q_cfg(),
       _linkspeed_bps(0),
-      _routing_strategy(MINIMAL_ADAPTIVE_ALG),
+      _routing_strategy(DIMENSION_ORDERED),
       _is_constellation(is_constellation),
       _latency(0),
       _altitude_in_m(0),
@@ -56,7 +63,6 @@ TwoDimensionalTorusTopology::TwoDimensionalTorusTopology(Logfile* logfile,
                                                          QueueLoggerFactory* q_log_factory,
                                                          uint32_t n,
                                                          uint32_t m,
-                                                         uint32_t n_virtual_channels,
                                                          queue_type queue_type,
                                                          mem_b queue_size,
                                                          linkspeed_bps linkspeed,
@@ -72,7 +78,7 @@ TwoDimensionalTorusTopology::TwoDimensionalTorusTopology(Logfile* logfile,
     : TwoDimensionalTorusTopology(logfile, q_log_factory, n, m, is_constellation) {
     // Set parameters
     set_routing_strategy(routing_strategy);
-    set_n_virtual_channels(n_virtual_channels);
+    set_n_virtual_channels();
     set_queue_params(queue_type, queue_size, disable_trim, trim_size, ecn_high, ecn_low);
     set_linkspeed(linkspeed);
     if (is_constellation) {
@@ -111,6 +117,9 @@ TwoDimensionalTorusTopology::TwoDimensionalTorusTopology(Logfile* logfile,
     uint32_t id = 0;
     for (uint32_t i = 0; i < _n; i++) {
         for (uint32_t j = 0; j < _m; j++) {
+            // Save id mapping
+            get_coords_of_switch[id] = {i, j};
+
             _switches[i][j] = new TwoDimensionalTorusSwitch(_eventlist, id++, _routing_strategy);
             _switches[i][j]->setName("Switch_(" + ntoa(i) + ", " + ntoa(j) + ")");
         }
@@ -172,7 +181,6 @@ TwoDimensionalTorusTopology::TwoDimensionalTorusTopology(Logfile* logfile,
                 // We allocate a queue of given type to _egress_queues with alloc_queue,
                 // and then populate _ingress_queues with LosslessInputQueue only
                 // if such queue types are used. Otherwise, ingress queues are left as nullptr.
-                // TODO: when allocating buffer size, divide by _n_virtual_channels
                 _north_egress_queues[i][j][vc] =
                     alloc_queue(n_queue_logger, _linkspeed_bps / _n_virtual_channels,
                                 _queue_size_b / _n_virtual_channels);
@@ -205,30 +213,35 @@ TwoDimensionalTorusTopology::TwoDimensionalTorusTopology(Logfile* logfile,
                     // E.g.: to NorthEgressQueue associate opposite Switch's SouthIngressQueue
                     // So determine coords of opposite switch
                     uint32_t n_i, n_j, e_i, e_j, s_i, s_j, w_i, w_j;
+
+                    // TODO: when in is_constellation mode, latency will be 0, and lossless input
+                    // queues, which use callback Pipes with inputted latency, will not function as
+                    // wanted. Find a way around that
+
                     // Simulate wrap-around when network edge is reached
                     n_i = (i == 0) ? _n - 1 : i - 1;
                     n_j = j;
-                    _north_ingress_queues[n_i][n_j][vc] = new LosslessInputQueue(
-                        *_eventlist, _south_egress_queues[i][j][vc], _switches[n_i][n_j], _latency);
-                    _north_ingress_queues[n_i][n_j][vc]->setName("NorthIngressQueue_(" + ntoa(n_i) +
+                    _south_ingress_queues[n_i][n_j][vc] = new LosslessInputQueue(
+                        *_eventlist, _north_egress_queues[i][j][vc], _switches[n_i][n_j], _latency);
+                    _south_ingress_queues[n_i][n_j][vc]->setName("SouthIngressQueue_(" + ntoa(n_i) +
                                                                  ", " + ntoa(n_j) + ")");
                     e_i = i;
                     e_j = (j == _m - 1) ? 0 : j + 1;
-                    _east_ingress_queues[e_i][e_j][vc] = new LosslessInputQueue(
-                        *_eventlist, _west_egress_queues[i][j][vc], _switches[e_i][e_j], _latency);
-                    _east_ingress_queues[e_i][e_j][vc]->setName("EastIngressQueue_(" + ntoa(e_i) +
+                    _west_ingress_queues[e_i][e_j][vc] = new LosslessInputQueue(
+                        *_eventlist, _east_egress_queues[i][j][vc], _switches[e_i][e_j], _latency);
+                    _west_ingress_queues[e_i][e_j][vc]->setName("WestIngressQueue_(" + ntoa(e_i) +
                                                                 ", " + ntoa(e_j) + ")");
                     s_i = (i == _n - 1) ? 0 : i + 1;
                     s_j = j;
-                    _south_ingress_queues[s_i][s_j][vc] = new LosslessInputQueue(
-                        *_eventlist, _north_egress_queues[i][j][vc], _switches[s_i][s_j], _latency);
-                    _south_ingress_queues[s_i][s_j][vc]->setName("SouthIngressQueue_(" + ntoa(s_i) +
+                    _north_ingress_queues[s_i][s_j][vc] = new LosslessInputQueue(
+                        *_eventlist, _south_egress_queues[i][j][vc], _switches[s_i][s_j], _latency);
+                    _north_ingress_queues[s_i][s_j][vc]->setName("NorthIngressQueue_(" + ntoa(s_i) +
                                                                  ", " + ntoa(s_j) + ")");
                     w_i = i;
                     w_j = (j == 0) ? _m - 1 : j - 1;
-                    _west_ingress_queues[w_i][w_j][vc] = new LosslessInputQueue(
-                        *_eventlist, _east_egress_queues[i][j][vc], _switches[w_i][w_j], _latency);
-                    _west_ingress_queues[w_i][w_j][vc]->setName("WestIngressQueue_(" + ntoa(w_i) +
+                    _east_ingress_queues[w_i][w_j][vc] = new LosslessInputQueue(
+                        *_eventlist, _west_egress_queues[i][j][vc], _switches[w_i][w_j], _latency);
+                    _east_ingress_queues[w_i][w_j][vc]->setName("EastIngressQueue_(" + ntoa(w_i) +
                                                                 ", " + ntoa(w_j) + ")");
                 } else {
                     // Do nothing.
@@ -295,13 +308,9 @@ void TwoDimensionalTorusTopology::set_routing_strategy(torus_routing_strategy rs
     _routing_strategy = rs;
 }
 
-void TwoDimensionalTorusTopology::set_n_virtual_channels(uint32_t n) {
-    if (_routing_strategy == DIMENSION_ORDERED) {
-        // In this case do not use virtual channels
-        _n_virtual_channels = 1;
-    } else {  // MINIMAL_ADAPTIVE_ALG needs at least 2 VCs
-        _n_virtual_channels = (n < 2) ? 2 : n;
-    }
+void TwoDimensionalTorusTopology::set_n_virtual_channels() {
+    // Two VCs for dimension-ordered, 3 for minimum adaptive
+    _n_virtual_channels = (_routing_strategy == DIMENSION_ORDERED) ? 2 : 3;
 }
 
 void TwoDimensionalTorusTopology::set_queue_params(queue_type queue_type,
@@ -400,7 +409,355 @@ Queue* TwoDimensionalTorusTopology::alloc_queue(QueueLogger* queue_logger,
             return q;
         }
         default:
+            // Uncaught exception, will eventually lead to abort() but hopefully with error message
+            // first
             throw runtime_error(
                 "Error allocating queue: queue type is invalid or hasn't been implemented");
     }
+}
+
+/*
+ * Since the minimal adaptive routing algorithm is based off dimension-ordered routing, we shall
+ * output the DOR routes, going along X direction first and then on Y direction.
+ * Furthermore, because the Pipes in the road represent virtual channels, the switches can choose
+ * whether to use another virtual channel from the ones outputted here
+ */
+vector<const Route*>* TwoDimensionalTorusTopology::get_bidir_paths(uint32_t src,
+                                                                   uint32_t dest,
+                                                                   bool reverse) {
+    vector<const Route*>* paths = new vector<const Route*>();
+    Route *route_src_dest, *route_src_dest_2, *route_src_dest_3, *route_src_dest_4;
+    // DOR admits one, two, or four minimal routes
+    route_src_dest = new Route();
+    route_src_dest_2 = nullptr;
+    route_src_dest_3 = nullptr;
+    route_src_dest_4 = nullptr;
+
+    // Coords are saved in [i, j] == [y-dimension, x-dimension]
+    vector<uint32_t> pkt_coords = get_coords_of_switch[src];
+    vector<uint32_t> dest_coords = get_coords_of_switch[dest];
+
+    // In dimension-ordered routing, we use two virtual channels per link.
+    // Then, when routing a packet from (x,y) to (x', y'), we first route it over one dimension, in
+    // our case over the X-dimension until the packet reaches coordinates (x', y) using VC0, and
+    // only then we route it over the Y-dimension using VC1.
+    // This ensures deadlock-free and minimal path routing.
+
+    // X-dimension routing
+    if (pkt_coords[1] != dest_coords[1]) {
+        // Three possibilities:
+        // 1. Packet needs to go east for min route (1 min route)
+        // 2. Packet needs to go west for min route (1 min route)
+        // 3. Packet can go east or west if routes are equidistant (2 min routes)
+
+        // 1. Eastward case: (x < x' && wrapping around to the west is slower) || (x > x' &&
+        // wrapping around to the east is faster)
+        if (((pkt_coords[1] < dest_coords[1]) && (dest_coords[1] - pkt_coords[1] < _m / 2)) ||
+            ((pkt_coords[1] > dest_coords[1]) && (pkt_coords[1] - dest_coords[1] > _m / 2))) {
+            // Create single eastward route
+            _add_eastward_route_to(route_src_dest, pkt_coords, dest_coords, reverse);
+        }
+
+        // 2. Westward case: (x > x' && wrapping around to the east is slower) || (x < x' &&
+        // wrapping around to he west is faster)
+        if (((pkt_coords[1] > dest_coords[1]) && (pkt_coords[1] - dest_coords[1] < _m / 2)) ||
+            ((pkt_coords[1] < dest_coords[1]) && (dest_coords[1] - pkt_coords[1] > _m / 2))) {
+            // Create single westward route
+            _add_westward_route_to(route_src_dest, pkt_coords, dest_coords, reverse);
+        }
+
+        // 3. Two min routes: ( |x->x'| == |x'->x| == _m/2)
+        if ((pkt_coords[1] - dest_coords[1] == _m / 2) ||
+            (dest_coords[1] - pkt_coords[1] == _m / 2)) {
+            // Add both east and west routes
+            _add_x_routes_to(route_src_dest, route_src_dest_2, pkt_coords, dest_coords, reverse);
+        }
+    }
+
+    // Y-dimension routing
+    if (pkt_coords[0] != dest_coords[0]) {
+        // Same logic as before, but with more subcases:
+        // 1.1. Packet must go north, and we start with a single route (end with 1 min route)
+        //   2. Packet must go north, and we start with two possible routes (end with 2 min routes)
+        //
+        // 2.1. Packet must go south, and we start with a single route (end with 1 min route)
+        //   2. Packet must go south, and we start with two possible routes (end with 2 min routes)
+        //
+        // 3.1. Packet can go either way, and we start with a single route (end with 2 min routes)
+        //   2. Packet can go either way, and we start with two possible routes (4 min routes)
+        //
+        // NOTE: we'll use route_src_dest_2's nullity as a proxy for if there's a second route
+
+        // 1. Northward case: (y < y' && southward wrap-around is slower) || (y > y' &&
+        // wrap-around north is faster)
+        if (((pkt_coords[0] < dest_coords[0]) && (dest_coords[0] - pkt_coords[0] < _n / 2)) ||
+            ((pkt_coords[0] > dest_coords[0]) && (pkt_coords[0] - dest_coords[0] > _n / 2))) {
+            // 1. We start with a single route
+            _add_northward_route_to(route_src_dest, pkt_coords, dest_coords, reverse);
+
+            // 2. We start with two possible routes
+            if (route_src_dest_2 != nullptr) {
+                _add_northward_route_to(route_src_dest_2, pkt_coords, dest_coords, reverse);
+            }
+        }
+
+        // 2. Southward case: (y > y' && wrap-around to the north is slower) || (y < y' &&
+        // wrap-around to the south is faster)
+        if (((pkt_coords[0] > dest_coords[0]) && (pkt_coords[0] - dest_coords[0] < _n / 2)) ||
+            ((pkt_coords[0] < dest_coords[0]) && (dest_coords[0] - pkt_coords[0] > _n / 2))) {
+            // 1. Single route
+            _add_southward_route_to(route_src_dest, pkt_coords, dest_coords, reverse);
+            if (route_src_dest_2 != nullptr) {
+                // 2. Two routes
+                _add_southward_route_to(route_src_dest_2, pkt_coords, dest_coords, reverse);
+            }
+        }
+
+        // 3. Two min routes: (|y->y'| == |y-y'| == _n/2)
+        if ((pkt_coords[0] - dest_coords[0] == _n / 2) ||
+            (dest_coords[0] - pkt_coords[0] == _n / 2)) {
+            // 1. Single route: copy route_src_dest into route3, so as to create one variant that
+            // goes north and another that goes south
+            route_src_dest_3 = route_src_dest->clone();
+            // TODO: check what happens to reverse when cloning
+            _add_y_routes_to(route_src_dest, route_src_dest_3, pkt_coords, dest_coords, reverse);
+            if (route_src_dest_2 != nullptr) {
+                // 2. Two routes: copy route_src_dest_2 into route_src_dest_4 and do the same as
+                // above
+                route_src_dest_4 = route_src_dest_2->clone();
+                _add_y_routes_to(route_src_dest_2, route_src_dest_4, pkt_coords, dest_coords,
+                                 reverse);
+            }
+        }
+    }
+
+    paths->push_back(route_src_dest);
+    if (route_src_dest_2 != nullptr) {
+        paths->push_back(route_src_dest_2);
+    }
+    if (route_src_dest_3 != nullptr) {
+        paths->push_back(route_src_dest_3);
+        paths->push_back(route_src_dest_4);
+    }
+
+    return paths;
+}
+
+/*
+ * Constructs eastward route on X-dimension from source's x to destination's x. This method
+ * doesn't handle Y-dimension routing.
+ * The construction follows dimension-ordered routing starting from the X-dimension, and so uses
+ * VC0.
+ */
+void TwoDimensionalTorusTopology::_add_eastward_route_to(Route* route,
+                                                         const vector<uint32_t>& src_coords,
+                                                         const vector<uint32_t>& dest_coords,
+                                                         bool reverse) {
+    vector<uint32_t> pkt_coords = src_coords;
+    vector<uint32_t> reverse_pkt_coords = dest_coords;
+
+    Route* reverse_route = (reverse) ? new Route() : nullptr;
+
+    while (pkt_coords[1] != dest_coords[1]) {
+        // Keep moving east, using wrap-around if necessary
+        route->push_back(_east_egress_queues[pkt_coords[0]][pkt_coords[1]][VC0]);
+        route->push_back(_eastbound_pipes[pkt_coords[0]][pkt_coords[1]][VC0]);
+
+        if (_queue_type == LOSSLESS_INPUT || _queue_type == LOSSLESS_INPUT_ECN) {
+            // Add matching lossless input queue (current queue's remote endpoint)
+            route->push_back(
+                _east_egress_queues[pkt_coords[0]][pkt_coords[1]][VC0]->getRemoteEndpoint());
+        }
+        // Increment x-coord with possible wrap-around
+        pkt_coords[1] = (pkt_coords[1] == _m - 1) ? 0 : pkt_coords[1] + 1;
+
+        if (reverse) {
+            // Apply same logic but from dest to src, so reverse route
+            reverse_route->push_back(
+                _west_egress_queues[reverse_pkt_coords[0]][reverse_pkt_coords[1]][VC0]);
+            reverse_route->push_back(
+                _westbound_pipes[reverse_pkt_coords[0]][reverse_pkt_coords[1]][VC0]);
+            if (_queue_type == LOSSLESS_INPUT || _queue_type == LOSSLESS_INPUT_ECN) {
+                reverse_route->push_back(
+                    _west_egress_queues[reverse_pkt_coords[0]][reverse_pkt_coords[1]][VC0]
+                        ->getRemoteEndpoint());
+            }
+            reverse_pkt_coords[1] =
+                (reverse_pkt_coords[1] == 0) ? _m - 1 : reverse_pkt_coords[1] - 1;
+        }
+    }
+
+    if (reverse) {
+        route->set_reverse(reverse_route);
+        reverse_route->set_reverse(route);
+    }
+}
+
+/*
+ * Constructs westward route on X-dimension from source's x to destination's x. This method
+ * doesn't handle Y-dimension routing.
+ * The construction follows dimension-ordered routing starting from the X-dimension, and so uses
+ * VC0.
+ */
+void TwoDimensionalTorusTopology::_add_westward_route_to(Route* route,
+                                                         const vector<uint32_t>& src_coords,
+                                                         const vector<uint32_t>& dest_coords,
+                                                         bool reverse) {
+    vector<uint32_t> pkt_coords = src_coords;
+    vector<uint32_t> reverse_pkt_coords = dest_coords;
+
+    Route* reverse_route = (reverse) ? new Route() : nullptr;
+
+    while (pkt_coords[1] != dest_coords[1]) {
+        // Keep moving west, using wrap-around if necessary
+        route->push_back(_west_egress_queues[pkt_coords[0]][pkt_coords[1]][VC0]);
+        route->push_back(_westbound_pipes[pkt_coords[0]][pkt_coords[1]][VC0]);
+
+        if (_queue_type == LOSSLESS_INPUT || _queue_type == LOSSLESS_INPUT_ECN) {
+            // Add matching lossless input queue (current queue's remote endpoint)
+            route->push_back(
+                _west_egress_queues[pkt_coords[0]][pkt_coords[1]][VC0]->getRemoteEndpoint());
+        }
+        // Decrement x-coord with possible wrap-around
+        pkt_coords[1] = (pkt_coords[1] == 0) ? _m - 1 : pkt_coords[1] - 1;
+
+        if (reverse) {
+            // Apply same logic but from dest to src, so reverse route
+            reverse_route->push_back(
+                _east_egress_queues[reverse_pkt_coords[0]][reverse_pkt_coords[1]][VC0]);
+            reverse_route->push_back(
+                _eastbound_pipes[reverse_pkt_coords[0]][reverse_pkt_coords[1]][VC0]);
+            if (_queue_type == LOSSLESS_INPUT || _queue_type == LOSSLESS_INPUT_ECN) {
+                reverse_route->push_back(
+                    _east_egress_queues[reverse_pkt_coords[0]][reverse_pkt_coords[1]][VC0]
+                        ->getRemoteEndpoint());
+            }
+            reverse_pkt_coords[1] =
+                (reverse_pkt_coords[1] == _m - 1) ? 0 : reverse_pkt_coords[1] + 1;
+        }
+    }
+
+    if (reverse) {
+        route->set_reverse(reverse_route);
+        reverse_route->set_reverse(route);
+    }
+}
+
+/*
+ * This method is only used when source-destination routes are of the same length going east as
+ * going west, so along the x-axis.
+ */
+void TwoDimensionalTorusTopology::_add_x_routes_to(Route* route1,
+                                                   Route* route2,
+                                                   const vector<uint32_t>& src_coords,
+                                                   const vector<uint32_t>& dest_coords,
+                                                   bool reverse) {
+    _add_eastward_route_to(route1, src_coords, dest_coords, reverse);
+    _add_westward_route_to(route2, src_coords, dest_coords, reverse);
+}
+
+void TwoDimensionalTorusTopology::_add_northward_route_to(Route* route,
+                                                          const vector<uint32_t>& src_coords,
+                                                          const vector<uint32_t>& dest_coords,
+                                                          bool reverse) {
+    vector<uint32_t> pkt_coords = src_coords;
+    vector<uint32_t> reverse_pkt_coords = dest_coords;
+
+    Route* reverse_route = nullptr;
+
+    if (reverse) {
+        // Reconstruct reverse route
+        // NOTE: if src and dest have the same X coords, then route's reverse was never initialised
+        reverse_route = (route->reverse() == nullptr) ? new Route() : route->reverse()->clone();
+    }
+
+    while (pkt_coords[0] != dest_coords[0]) {
+        route->push_back(_north_egress_queues[pkt_coords[0]][pkt_coords[1]][VC1]);
+        route->push_back(_northbound_pipes[pkt_coords[0]][pkt_coords[1]][VC1]);
+
+        if (_queue_type == LOSSLESS_INPUT || _queue_type == LOSSLESS_INPUT_ECN) {
+            route->push_back(
+                _north_egress_queues[pkt_coords[0]][pkt_coords[1]][VC1]->getRemoteEndpoint());
+        }
+        pkt_coords[0] = (pkt_coords[0] == 0) ? _n - 1 : pkt_coords[0] - 1;
+
+        if (reverse) {
+            reverse_route->push_back(
+                _south_egress_queues[reverse_pkt_coords[0]][reverse_pkt_coords[1]][VC1]);
+            reverse_route->push_back(
+                _southbound_pipes[reverse_pkt_coords[0]][reverse_pkt_coords[1]][VC1]);
+            if (_queue_type == LOSSLESS_INPUT || _queue_type == LOSSLESS_INPUT_ECN) {
+                reverse_route->push_back(
+                    _south_egress_queues[reverse_pkt_coords[0]][reverse_pkt_coords[1]][VC1]
+                        ->getRemoteEndpoint());
+            }
+            reverse_pkt_coords[0] =
+                (reverse_pkt_coords[0] == _n - 1) ? 0 : reverse_pkt_coords[0] + 1;
+        }
+    }
+
+    // Overwrite reverse route to update
+    if (reverse) {
+        // Avoid memory leak, as we dereference the old reverse route and won-t reference it again
+        delete route->reverse();
+        route->set_reverse(reverse_route);
+        reverse_route->set_reverse(route);
+    }
+}
+
+void TwoDimensionalTorusTopology::_add_southward_route_to(Route* route,
+                                                          const vector<uint32_t>& src_coords,
+                                                          const vector<uint32_t>& dest_coords,
+                                                          bool reverse) {
+    vector<uint32_t> pkt_coords = src_coords;
+    vector<uint32_t> reverse_pkt_coords = dest_coords;
+
+    Route* reverse_route = nullptr;
+
+    if (reverse) {
+        // Reconstruct reverse route
+        reverse_route = (route->reverse() == nullptr) ? new Route() : route->reverse()->clone();
+    }
+
+    while (pkt_coords[0] != dest_coords[0]) {
+        route->push_back(_south_egress_queues[pkt_coords[0]][pkt_coords[1]][VC1]);
+        route->push_back(_southbound_pipes[pkt_coords[0]][pkt_coords[1]][VC1]);
+
+        if (_queue_type == LOSSLESS_INPUT || _queue_type == LOSSLESS_INPUT_ECN) {
+            route->push_back(
+                _south_egress_queues[pkt_coords[0]][pkt_coords[1]][VC1]->getRemoteEndpoint());
+        }
+        pkt_coords[0] = (pkt_coords[0] == _n - 1) ? 0 : pkt_coords[0] + 1;
+
+        if (reverse) {
+            reverse_route->push_back(
+                _north_egress_queues[reverse_pkt_coords[0]][reverse_pkt_coords[1]][VC1]);
+            reverse_route->push_back(
+                _northbound_pipes[reverse_pkt_coords[0]][reverse_pkt_coords[1]][VC1]);
+            if (_queue_type == LOSSLESS_INPUT || _queue_type == LOSSLESS_INPUT_ECN) {
+                reverse_route->push_back(
+                    _north_egress_queues[reverse_pkt_coords[0]][reverse_pkt_coords[1]][VC1]
+                        ->getRemoteEndpoint());
+            }
+            reverse_pkt_coords[0] =
+                (reverse_pkt_coords[0] == 0) ? _n - 1 : reverse_pkt_coords[0] - 1;
+        }
+    }
+
+    // Overwrite reverse route to update
+    if (reverse) {
+        // Avoid memory leak, as we dereference the old reverse route and won-t reference it again
+        delete route->reverse();
+        route->set_reverse(reverse_route);
+        reverse_route->set_reverse(route);
+    }
+}
+
+void TwoDimensionalTorusTopology::_add_y_routes_to(Route* route1,
+                                                   Route* route2,
+                                                   const vector<uint32_t>& src_coords,
+                                                   const vector<uint32_t>& dest_coords,
+                                                   bool reverse) {
+    _add_northward_route_to(route1, src_coords, dest_coords, reverse);
+    _add_southward_route_to(route2, src_coords, dest_coords, reverse);
 }

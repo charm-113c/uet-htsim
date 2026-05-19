@@ -3,6 +3,7 @@
 #define TWO_DIMENSIONAL_TORUS
 #include <cmath>
 #include <cstdint>
+#include <unordered_map>
 #include <vector>
 #include "2d_torus_switch.h"
 #include "config.h"
@@ -67,6 +68,8 @@ public:
 
     //! n*m 2D vector of switches
     vector<vector<Switch*>> _switches;
+    // TODO: add vector of queues from server to switches and their corresponding pipes
+
     //! 3D vector for Pipe: first 2D correspond to associated switch, 3rd dimension represents the
     //! virtual channels
     vector<vector<vector<Pipe*>>> _northbound_pipes;
@@ -86,6 +89,9 @@ public:
     vector<vector<vector<Queue*>>> _west_ingress_queues;
     // NOTE: The order N, E, S, W is the default used throughout the topology for directions
 
+    //! Map switch ids to their network coordinate
+    unordered_map<uint32_t, vector<uint32_t>> get_coords_of_switch;
+
     //! Minimal constructor to set defaults, used to not bloat full constructor
     TwoDimensionalTorusTopology(Logfile* logfile,
                                 QueueLoggerFactory* q_log_factory,
@@ -97,7 +103,6 @@ public:
                                 QueueLoggerFactory* q_log_factory,
                                 uint32_t n,
                                 uint32_t m,
-                                uint32_t n_virtual_channels,
                                 queue_type queue_type,
                                 mem_b queue_size,
                                 linkspeed_bps linkspeed,
@@ -143,7 +148,7 @@ private:
     uint32_t _altitude_in_m;
     float_t _inclination_in_deg;
 
-    void set_n_virtual_channels(uint32_t n_virtual_channels);
+    void set_n_virtual_channels();
     void set_queue_params(queue_type queue_type,
                           mem_b queue_size,
                           bool disable_trim,
@@ -156,6 +161,33 @@ private:
     void set_switch_latency(simtime_picosec latency);
 
     Queue* alloc_queue(QueueLogger* queue_logger, linkspeed_bps linkspeed_bps, mem_b queue_size);
+
+    void _add_eastward_route_to(Route* route,
+                                const vector<uint32_t>& src_coords,
+                                const vector<uint32_t>& dest_coords,
+                                bool reverse);
+    void _add_westward_route_to(Route* route,
+                                const vector<uint32_t>& src_coords,
+                                const vector<uint32_t>& dest_coords,
+                                bool reverse);
+    void _add_x_routes_to(Route* route1,
+                          Route* route2,
+                          const vector<uint32_t>& src_coords,
+                          const vector<uint32_t>& dest_coords,
+                          bool reverse);
+    void _add_northward_route_to(Route* route,
+                                 const vector<uint32_t>& src_coords,
+                                 const vector<uint32_t>& dest_coords,
+                                 bool);
+    void _add_southward_route_to(Route* route,
+                                 const vector<uint32_t>& src_coords,
+                                 const vector<uint32_t>& dest_coords,
+                                 bool);
+    void _add_y_routes_to(Route* route1,
+                          Route* route2,
+                          const vector<uint32_t>& src_coords,
+                          const vector<uint32_t>& dest_coords,
+                          bool);
 };
 
 #endif  //! TWO_DIMENSIONAL_TORUS
