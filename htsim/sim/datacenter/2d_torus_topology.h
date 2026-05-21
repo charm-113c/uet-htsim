@@ -68,8 +68,15 @@ public:
 
     //! n*m 2D vector of switches
     vector<vector<Switch*>> _switches;
-    // TODO: add vector of queues from server to switches and their corresponding pipes
+    //! Each switch is assigned one or more servers/hosts
+    //! So we model those hosts' egress queues and the pipes between them
+    //! 3D vector: first 2D correspond to switch, 3rd is the associated hosts
+    vector<vector<vector<Queue*>>> _host_to_switch_queues;
+    vector<vector<vector<Queue*>>> _switch_to_host_queues;
+    vector<vector<vector<Pipe*>>> _host_to_switch_pipes;
+    vector<vector<vector<Pipe*>>> _switch_to_host_pipes;
 
+    //! Switch-to-switch network
     //! 3D vector for Pipe: first 2D correspond to associated switch, 3rd dimension represents the
     //! virtual channels
     vector<vector<vector<Pipe*>>> _northbound_pipes;
@@ -87,10 +94,11 @@ public:
     vector<vector<vector<Queue*>>> _east_ingress_queues;
     vector<vector<vector<Queue*>>> _south_ingress_queues;
     vector<vector<vector<Queue*>>> _west_ingress_queues;
-    // NOTE: The order N, E, S, W is the default used throughout the topology for directions
 
     //! Map switch ids to their network coordinate
     unordered_map<uint32_t, vector<uint32_t>> get_coords_of_switch;
+    //! Map host ids to their coordinate (switch coords + host's position)
+    unordered_map<uint32_t, vector<uint32_t>> get_coords_of_host;
 
     //! Minimal constructor to set defaults, used to not bloat full constructor
     TwoDimensionalTorusTopology(Logfile* logfile,
@@ -103,7 +111,9 @@ public:
                                 QueueLoggerFactory* q_log_factory,
                                 uint32_t n,
                                 uint32_t m,
-                                queue_type queue_type,
+                                uint32_t hosts_per_switch,
+                                queue_type switch_queue_type,
+                                queue_type host_queue_type,
                                 mem_b queue_size,
                                 linkspeed_bps linkspeed,
                                 bool disable_trim,
@@ -121,21 +131,23 @@ public:
     virtual vector<const Route*>* get_bidir_paths(uint32_t src, uint32_t dest, bool reverse);
     virtual vector<uint32_t>* get_neighbours(uint32_t src);
 
-    // TODO: simple, check if needed though
     virtual void add_switch_loggers(Logfile& log, simtime_picosec sample_period);
+    // NOTE: while Switches and Queues can be logged (see constructor for queues), the same isn't
+    // true for Pipes, likely since they represent links
 
 private:
     //! In satellite constellation, N is the number of orbital planes and M is the number of
     //! satellite per plane
     uint32_t _n;
     uint32_t _m;
+    uint32_t _hosts_per_switch;
     uint32_t _n_virtual_channels;
 
-    queue_type _queue_type;
+    queue_type _switch_queue_type;
+    queue_type _host_queue_type;
     mem_b _queue_size_b;
     composite_q_cfg _composite_q_cfg;
 
-    // TODO: divide bandwidth by n_virtual_channels where relevant
     linkspeed_bps _linkspeed_bps;
     torus_routing_strategy _routing_strategy;
 
@@ -149,17 +161,23 @@ private:
     float_t _inclination_in_deg;
 
     void set_n_virtual_channels();
-    void set_queue_params(queue_type queue_type,
+    void set_hosts_per_switch(uint32_t hosts_per_switch);
+    void set_queue_params(queue_type switch_queue_type,
+                          queue_type host_queue_type,
                           mem_b queue_size,
                           bool disable_trim,
                           uint16_t trim_size,
                           mem_b ecn_high,
                           mem_b ecn_low);
+    // TODO: create different linkspeeds for different components
     void set_linkspeed(linkspeed_bps linkspeed);
     void set_routing_strategy(torus_routing_strategy routing_strategy);
     void set_constellation_params(uint32_t altitude, float_t inclination);
     void set_switch_latency(simtime_picosec latency);
 
+    //! Hosts (servers) may have multiple packet flows, so need to be allocated specific queue types
+    Queue* alloc_host_queue(QueueLogger* queue_logger, linkspeed_bps linkspeed_bps);
+    //! By contrast, switch's queues only care about receiving packets and forwarding them
     Queue* alloc_queue(QueueLogger* queue_logger, linkspeed_bps linkspeed_bps, mem_b queue_size);
 
     void _add_eastward_route_to(Route* route,

@@ -17,6 +17,7 @@
 #include "loggertypes.h"
 #include "main.h"
 #include "network.h"
+#include "pipe.h"
 #include "prioqueue.h"
 #include "queue.h"
 #include "queue_lossless.h"
@@ -25,11 +26,6 @@
 #include "randomqueue.h"
 #include "route.h"
 #include "switch.h"
-
-#define NORTH 0
-#define EAST 1
-#define SOUTH 2
-#define WEST 3
 
 // Define virtual channels 0 and 1
 // NOTE: constructor ensures those two must exist, although there may be more
@@ -47,8 +43,9 @@ TwoDimensionalTorusTopology::TwoDimensionalTorusTopology(Logfile* logfile,
       _q_logger_factory(q_log_factory),
       _n(n),
       _m(m),
+      _hosts_per_switch(0),
       _n_virtual_channels(0),
-      _queue_type(UNDEFINED),
+      _switch_queue_type(UNDEFINED),
       _queue_size_b(0),
       _composite_q_cfg(),
       _linkspeed_bps(0),
@@ -63,7 +60,9 @@ TwoDimensionalTorusTopology::TwoDimensionalTorusTopology(Logfile* logfile,
                                                          QueueLoggerFactory* q_log_factory,
                                                          uint32_t n,
                                                          uint32_t m,
-                                                         queue_type queue_type,
+                                                         uint32_t hosts_per_switch,
+                                                         queue_type switch_queue_type,
+                                                         queue_type host_queue_type,
                                                          mem_b queue_size,
                                                          linkspeed_bps linkspeed,
                                                          bool disable_trim,
@@ -77,9 +76,11 @@ TwoDimensionalTorusTopology::TwoDimensionalTorusTopology(Logfile* logfile,
                                                          float_t inclination)
     : TwoDimensionalTorusTopology(logfile, q_log_factory, n, m, is_constellation) {
     // Set parameters
+    set_hosts_per_switch(hosts_per_switch);
     set_routing_strategy(routing_strategy);
     set_n_virtual_channels();
-    set_queue_params(queue_type, queue_size, disable_trim, trim_size, ecn_high, ecn_low);
+    set_queue_params(switch_queue_type, host_queue_type, queue_size, disable_trim, trim_size,
+                     ecn_high, ecn_low);
     set_linkspeed(linkspeed);
     if (is_constellation) {
         set_constellation_params(altitude, inclination);
@@ -92,6 +93,15 @@ TwoDimensionalTorusTopology::TwoDimensionalTorusTopology(Logfile* logfile,
     // If things don't go right, explicitly set values to nullptr with loops here
     _switches.resize(_n, vector<Switch*>(_m));
 
+    // Switch-host networking
+    _host_to_switch_queues.resize(_n,
+                                  vector<vector<Queue*>>(_m, vector<Queue*>(_hosts_per_switch)));
+    _switch_to_host_queues.resize(_n,
+                                  vector<vector<Queue*>>(_m, vector<Queue*>(_hosts_per_switch)));
+    _host_to_switch_pipes.resize(_n, vector<vector<Pipe*>>(_m, vector<Pipe*>(_hosts_per_switch)));
+    _switch_to_host_pipes.resize(_n, vector<vector<Pipe*>>(_m, vector<Pipe*>(_hosts_per_switch)));
+
+    // Switch-switch networking
     _north_egress_queues.resize(_n,
                                 vector<vector<Queue*>>(_m, vector<Queue*>(_n_virtual_channels)));
     _east_egress_queues.resize(_n, vector<vector<Queue*>>(_m, vector<Queue*>(_n_virtual_channels)));
@@ -126,15 +136,44 @@ TwoDimensionalTorusTopology::TwoDimensionalTorusTopology(Logfile* logfile,
     }
 
     // Create queues and pipes
+    uint32_t host_id = 0;
+    QueueLogger* hst_swi_q_logger;
+    QueueLogger* swi_hst_q_logger;
+
     QueueLogger* n_queue_logger;
     QueueLogger* e_queue_logger;
     QueueLogger* s_queue_logger;
     QueueLogger* w_queue_logger;
     for (uint32_t i = 0; i < _n; i++) {
         for (uint32_t j = 0; j < _m; j++) {
+            // Switch-host networking
+            for (uint32_t host = 0; host < _hosts_per_switch; host++) {
+                // Map id to position
+                get_coords_of_host[host_id++] = {i, j, host};
+                // Create Pipes
+                // TODO: create a switch-host latency field
+                _host_to_switch_pipes[i][j][host] = new Pipe(_latency, *_eventlist);
+                _switch_to_host_pipes[i][j][host] = new Pipe(_latency, *_eventlist);
+                _host_to_switch_pipes[i][j][host]->setName("Pipe_Host" + ntoa(host) + "->Switch(" +
+                                                           ntoa(j) + ", " + ntoa(i) + ")");
+                _switch_to_host_pipes[i][j][host]->setName("Pipe_Switch(" + ntoa(j) + ", " +
+                                                           ntoa(i) + ")->Host" + ntoa(host));
+
+                // Create queues
+                hst_swi_q_logger =
+                    (_q_logger_factory) ? _q_logger_factory->createQueueLogger() : nullptr;
+                swi_hst_q_logger =
+                    (_q_logger_factory) ? _q_logger_factory->createQueueLogger() : nullptr;
+
+                _host_to_switch_queues[i][j][host] =
+                    alloc_host_queue(hst_swi_q_logger, _linkspeed_bps);
+                _switch_to_host_queues[i][j][host] =
+                    alloc_queue(swi_hst_q_logger, _linkspeed_bps, _queue_size_b);
+            }
+
+            // Switch-switch networking
             for (uint32_t vc = 0; vc < _n_virtual_channels; vc++) {
                 // --- Create Pipes ---
-                // TODO: Check correctness in Pipe creation
                 if (is_constellation) {
                     _northbound_pipes[i][j][vc] =
                         new InterSatelliteLink(InterSatelliteLink::ISL_Type::INTERPLANE,
@@ -155,13 +194,13 @@ TwoDimensionalTorusTopology::TwoDimensionalTorusTopology(Logfile* logfile,
                     _westbound_pipes[i][j][vc] = new Pipe(_latency, *_eventlist);
                 }
                 // Set names
-                _northbound_pipes[i][j][vc]->setName("NorthboundPipe_(" + ntoa(i) + ", " + ntoa(j) +
+                _northbound_pipes[i][j][vc]->setName("NorthboundPipe_(" + ntoa(j) + ", " + ntoa(i) +
                                                      ")");
-                _eastbound_pipes[i][j][vc]->setName("EastboundPipe_(" + ntoa(i) + ", " + ntoa(j) +
+                _eastbound_pipes[i][j][vc]->setName("EastboundPipe_(" + ntoa(j) + ", " + ntoa(i) +
                                                     ")");
-                _southbound_pipes[i][j][vc]->setName("SouthboundPipe_(" + ntoa(i) + ", " + ntoa(j) +
+                _southbound_pipes[i][j][vc]->setName("SouthboundPipe_(" + ntoa(j) + ", " + ntoa(i) +
                                                      ")");
-                _westbound_pipes[i][j][vc]->setName("WestboundPipe_(" + ntoa(i) + ", " + ntoa(j) +
+                _westbound_pipes[i][j][vc]->setName("WestboundPipe_(" + ntoa(j) + ", " + ntoa(i) +
                                                     ")");
                 // --------------------
 
@@ -194,21 +233,22 @@ TwoDimensionalTorusTopology::TwoDimensionalTorusTopology(Logfile* logfile,
                     alloc_queue(w_queue_logger, _linkspeed_bps / _n_virtual_channels,
                                 _queue_size_b / _n_virtual_channels);
 
-                _north_egress_queues[i][j][vc]->setName("NorthEgressQueue_(" + ntoa(i) + ", " +
-                                                        ntoa(j) + ")");
-                _east_egress_queues[i][j][vc]->setName("EastEgressQueue_(" + ntoa(i) + ", " +
-                                                       ntoa(j) + ")");
-                _south_egress_queues[i][j][vc]->setName("SouthEgressQueue_(" + ntoa(i) + ", " +
-                                                        ntoa(j) + ")");
-                _west_egress_queues[i][j][vc]->setName("WestEgressQueue_(" + ntoa(i) + ", " +
-                                                       ntoa(j) + ")");
+                _north_egress_queues[i][j][vc]->setName("NorthEgressQueue_(" + ntoa(j) + ", " +
+                                                        ntoa(i) + ")");
+                _east_egress_queues[i][j][vc]->setName("EastEgressQueue_(" + ntoa(j) + ", " +
+                                                       ntoa(i) + ")");
+                _south_egress_queues[i][j][vc]->setName("SouthEgressQueue_(" + ntoa(j) + ", " +
+                                                        ntoa(i) + ")");
+                _west_egress_queues[i][j][vc]->setName("WestEgressQueue_(" + ntoa(j) + ", " +
+                                                       ntoa(i) + ")");
                 // Connect switch to these queues
                 _switches[i][j]->addPort(_north_egress_queues[i][j][vc]);
                 _switches[i][j]->addPort(_east_egress_queues[i][j][vc]);
                 _switches[i][j]->addPort(_south_egress_queues[i][j][vc]);
                 _switches[i][j]->addPort(_west_egress_queues[i][j][vc]);
 
-                if (_queue_type == LOSSLESS_INPUT || _queue_type == LOSSLESS_INPUT_ECN) {
+                if (_switch_queue_type == LOSSLESS_INPUT ||
+                    _switch_queue_type == LOSSLESS_INPUT_ECN) {
                     // Create an ingress queue for the switch opposite to appropriate egress switch
                     // E.g.: to NorthEgressQueue associate opposite Switch's SouthIngressQueue
                     // So determine coords of opposite switch
@@ -259,9 +299,7 @@ TwoDimensionalTorusTopology::TwoDimensionalTorusTopology(Logfile* logfile,
                 // --------------------
             }
 
-            // TODO: Deal with logging, is it automatic for Switches and Pipes or is a manual setup
-            // needed?
-            // NOTE: Pipes are "connected" upon route creation, see get_bidir_paths of fat tree
+            // NOTE: Pipes are "connected" upon route creation, see get_bidir_paths
         }
     }
 }
@@ -288,6 +326,11 @@ TwoDimensionalTorusTopology::~TwoDimensionalTorusTopology() {
     }
     _switches.clear();
 
+    delete_3d_vector(_host_to_switch_queues);
+    delete_3d_vector(_host_to_switch_pipes);
+    delete_3d_vector(_switch_to_host_queues);
+    delete_3d_vector(_switch_to_host_pipes);
+
     delete_3d_vector(_north_egress_queues);
     delete_3d_vector(_east_egress_queues);
     delete_3d_vector(_south_egress_queues);
@@ -304,6 +347,9 @@ TwoDimensionalTorusTopology::~TwoDimensionalTorusTopology() {
     delete_3d_vector(_eastbound_pipes);
 }
 
+void TwoDimensionalTorusTopology::set_hosts_per_switch(uint32_t hosts_per_switch) {
+    _hosts_per_switch = (hosts_per_switch == 0) ? 1 : hosts_per_switch;
+}
 void TwoDimensionalTorusTopology::set_routing_strategy(torus_routing_strategy rs) {
     _routing_strategy = rs;
 }
@@ -313,18 +359,19 @@ void TwoDimensionalTorusTopology::set_n_virtual_channels() {
     _n_virtual_channels = (_routing_strategy == DIMENSION_ORDERED) ? 2 : 3;
 }
 
-void TwoDimensionalTorusTopology::set_queue_params(queue_type queue_type,
+void TwoDimensionalTorusTopology::set_queue_params(queue_type switch_queue_type,
+                                                   queue_type host_queue_type,
                                                    mem_b queue_size,
                                                    bool disable_trim,
                                                    uint16_t trim_size,
                                                    mem_b ecn_high,
                                                    mem_b ecn_low) {
-    // Default to lossless
-    _queue_type = (queue_type == UNDEFINED) ? LOSSLESS : queue_type;
-    // Default to accomodating 1 packet per virtual channel
-    _queue_size_b = (queue_size == 0) ? memFromPkt(_n_virtual_channels) : queue_size;
+    _switch_queue_type = (switch_queue_type == UNDEFINED) ? LOSSLESS : switch_queue_type;
+    _host_queue_type = (host_queue_type == UNDEFINED) ? FAIR_PRIO : host_queue_type;
+    // Default to accomodating 10 packet per virtual channel
+    _queue_size_b = (queue_size == 0) ? memFromPkt(10 * _n_virtual_channels) : queue_size;
 
-    if (_queue_type == COMPOSITE || _queue_type == COMPOSITE_ECN) {
+    if (_switch_queue_type == COMPOSITE || _switch_queue_type == COMPOSITE_ECN) {
         ecn_low = (ecn_low == 0) ? ecn_high : ecn_low;
         _composite_q_cfg = composite_q_cfg{disable_trim, trim_size, ecn_high, ecn_low};
     }
@@ -349,16 +396,41 @@ void TwoDimensionalTorusTopology::set_constellation_params(uint32_t altitude, fl
     } else {
         _inclination_in_deg = inclination;
     }
+    // TODO: since latency will still be used by lossless ingress queues' callback pipes, we cannot
+    // leave it at 0. Instead, compute the fuxed intraplane latency and use that, all the while
+    // giving the warning that that's what's happening
 }
 
 void TwoDimensionalTorusTopology::set_switch_latency(simtime_picosec latency) {
     _latency = latency;
 }
 
+Queue* TwoDimensionalTorusTopology::alloc_host_queue(QueueLogger* queue_logger,
+                                                     linkspeed_bps linkspeed_bps) {
+    // NOTE: since these queues need to handle multiple senders at once, their size is considerably
+    // larger than switch queues (at the time of writing, FEEDER_BUFFER=1000)
+    switch (_host_queue_type) {
+        case PRIORITY:
+            // Priority queue with 3 levels, low, mid, and high. Heavily favours high priority
+            // packets.
+            return new PriorityQueue(linkspeed_bps, memFromPkt(FEEDER_BUFFER), *_eventlist,
+                                     queue_logger);
+        case FAIR_PRIO:
+            // Similar to PriorityQueue, but handles packets more fairly
+            return new FairPriorityQueue(linkspeed_bps, memFromPkt(FEEDER_BUFFER), *_eventlist,
+                                         queue_logger);
+        default:
+            // Uncaught exception, will eventually lead to abort() but hopefully with error message
+            // first
+            throw runtime_error(
+                "Error allocating host queue: queue type is invalid or hasn't been implemented");
+    }
+}
+
 Queue* TwoDimensionalTorusTopology::alloc_queue(QueueLogger* queue_logger,
                                                 linkspeed_bps linkspeed_bps,
                                                 mem_b queue_size) {
-    switch (_queue_type) {
+    switch (_switch_queue_type) {
         case RANDOM:
             // Simple queue that randomly decides whether to drop packet when above a given
             // threshold (set through RANDOM_BUFFER), and drops incoming packet when full
@@ -383,8 +455,7 @@ Queue* TwoDimensionalTorusTopology::alloc_queue(QueueLogger* queue_logger,
             return new LosslessOutputQueue(linkspeed_bps, memFromPkt(10000), *_eventlist,
                                            queue_logger);
         case CTRL_PRIO:
-            // Queue that sets packets as high or low priority, but I'm unsure of its workings, what
-            // it's supposed to do uniquely
+            // Queue that sets packets as high or low priority and serves them accordingly
             return new CtrlPrioQueue(linkspeed_bps, queue_size, *_eventlist, queue_logger);
         case COMPOSITE:
             // Complex queue type: contains high and low priority buffers, with weighted round
@@ -412,7 +483,7 @@ Queue* TwoDimensionalTorusTopology::alloc_queue(QueueLogger* queue_logger,
             // Uncaught exception, will eventually lead to abort() but hopefully with error message
             // first
             throw runtime_error(
-                "Error allocating queue: queue type is invalid or hasn't been implemented");
+                "Error allocating switch queue: queue type is invalid or hasn't been implemented");
     }
 }
 
@@ -433,9 +504,9 @@ vector<const Route*>* TwoDimensionalTorusTopology::get_bidir_paths(uint32_t src,
     route_src_dest_3 = nullptr;
     route_src_dest_4 = nullptr;
 
-    // Coords are saved in [i, j] == [y-dimension, x-dimension]
-    vector<uint32_t> pkt_coords = get_coords_of_switch[src];
-    vector<uint32_t> dest_coords = get_coords_of_switch[dest];
+    // Coords are saved in [i, j, host_position] == [y-dimension, x-dimension, host_position]
+    vector<uint32_t> pkt_coords = get_coords_of_host[src];
+    vector<uint32_t> dest_coords = get_coords_of_host[dest];
 
     // In dimension-ordered routing, we use two virtual channels per link.
     // Then, when routing a packet from (x,y) to (x', y'), we first route it over one dimension, in
@@ -519,12 +590,25 @@ vector<const Route*>* TwoDimensionalTorusTopology::get_bidir_paths(uint32_t src,
             // 1. Single route: copy route_src_dest into route3, so as to create one variant that
             // goes north and another that goes south
             route_src_dest_3 = route_src_dest->clone();
-            // TODO: check what happens to reverse when cloning
+            // NOTE: clone() only makes a shallow copy of the reverse, meaning route and route3
+            // would share the same reverse, which we don't want as each will go in a different
+            // direction and have different reverse routes
+            if (route_src_dest->reverse() != nullptr) {
+                Route* rev_clone = route_src_dest->reverse()->clone();
+                route_src_dest_3->set_reverse(rev_clone);
+                rev_clone->set_reverse(route_src_dest_3);
+            }
             _add_y_routes_to(route_src_dest, route_src_dest_3, pkt_coords, dest_coords, reverse);
+
             if (route_src_dest_2 != nullptr) {
                 // 2. Two routes: copy route_src_dest_2 into route_src_dest_4 and do the same as
                 // above
                 route_src_dest_4 = route_src_dest_2->clone();
+                if (route_src_dest_2->reverse() != nullptr) {
+                    Route* rev_clone = route_src_dest_2->reverse()->clone();
+                    route_src_dest_4->set_reverse(rev_clone);
+                    rev_clone->set_reverse(route_src_dest_4);
+                }
                 _add_y_routes_to(route_src_dest_2, route_src_dest_4, pkt_coords, dest_coords,
                                  reverse);
             }
@@ -558,12 +642,24 @@ void TwoDimensionalTorusTopology::_add_eastward_route_to(Route* route,
 
     Route* reverse_route = (reverse) ? new Route() : nullptr;
 
+    // First push the host's egress queues into route to allow packets into switch.
+    route->push_back(_host_to_switch_queues[pkt_coords[0]][pkt_coords[1]][pkt_coords[2]]);
+    route->push_back(_host_to_switch_pipes[pkt_coords[0]][pkt_coords[1]][pkt_coords[2]]);
+    if (reverse) {
+        reverse_route->push_back(
+            _host_to_switch_queues[reverse_pkt_coords[0]][reverse_pkt_coords[1]]
+                                  [reverse_pkt_coords[2]]);
+        reverse_route->push_back(_host_to_switch_pipes[reverse_pkt_coords[0]][reverse_pkt_coords[1]]
+                                                      [reverse_pkt_coords[2]]);
+    }
+
+    // Then move east
     while (pkt_coords[1] != dest_coords[1]) {
         // Keep moving east, using wrap-around if necessary
         route->push_back(_east_egress_queues[pkt_coords[0]][pkt_coords[1]][VC0]);
         route->push_back(_eastbound_pipes[pkt_coords[0]][pkt_coords[1]][VC0]);
 
-        if (_queue_type == LOSSLESS_INPUT || _queue_type == LOSSLESS_INPUT_ECN) {
+        if (_switch_queue_type == LOSSLESS_INPUT || _switch_queue_type == LOSSLESS_INPUT_ECN) {
             // Add matching lossless input queue (current queue's remote endpoint)
             route->push_back(
                 _east_egress_queues[pkt_coords[0]][pkt_coords[1]][VC0]->getRemoteEndpoint());
@@ -577,13 +673,25 @@ void TwoDimensionalTorusTopology::_add_eastward_route_to(Route* route,
                 _west_egress_queues[reverse_pkt_coords[0]][reverse_pkt_coords[1]][VC0]);
             reverse_route->push_back(
                 _westbound_pipes[reverse_pkt_coords[0]][reverse_pkt_coords[1]][VC0]);
-            if (_queue_type == LOSSLESS_INPUT || _queue_type == LOSSLESS_INPUT_ECN) {
+            if (_switch_queue_type == LOSSLESS_INPUT || _switch_queue_type == LOSSLESS_INPUT_ECN) {
                 reverse_route->push_back(
                     _west_egress_queues[reverse_pkt_coords[0]][reverse_pkt_coords[1]][VC0]
                         ->getRemoteEndpoint());
             }
             reverse_pkt_coords[1] =
                 (reverse_pkt_coords[1] == 0) ? _m - 1 : reverse_pkt_coords[1] - 1;
+        }
+    }
+
+    // If dest is reached, route packet from switch to host
+    if (pkt_coords[0] == dest_coords[0]) {
+        route->push_back(_switch_to_host_queues[dest_coords[0]][dest_coords[1]][dest_coords[2]]);
+        route->push_back(_switch_to_host_pipes[dest_coords[0]][dest_coords[1]][dest_coords[2]]);
+        if (reverse) {
+            reverse_route->push_back(
+                _switch_to_host_queues[src_coords[0]][src_coords[1]][src_coords[2]]);
+            reverse_route->push_back(
+                _switch_to_host_pipes[src_coords[0]][src_coords[1]][src_coords[2]]);
         }
     }
 
@@ -608,12 +716,23 @@ void TwoDimensionalTorusTopology::_add_westward_route_to(Route* route,
 
     Route* reverse_route = (reverse) ? new Route() : nullptr;
 
+    // First push the host's egress queues into route to allow packets into switch.
+    route->push_back(_host_to_switch_queues[pkt_coords[0]][pkt_coords[1]][pkt_coords[2]]);
+    route->push_back(_host_to_switch_pipes[pkt_coords[0]][pkt_coords[1]][pkt_coords[2]]);
+    if (reverse) {
+        reverse_route->push_back(
+            _host_to_switch_queues[reverse_pkt_coords[0]][reverse_pkt_coords[1]]
+                                  [reverse_pkt_coords[2]]);
+        reverse_route->push_back(_host_to_switch_pipes[reverse_pkt_coords[0]][reverse_pkt_coords[1]]
+                                                      [reverse_pkt_coords[2]]);
+    }
+
     while (pkt_coords[1] != dest_coords[1]) {
         // Keep moving west, using wrap-around if necessary
         route->push_back(_west_egress_queues[pkt_coords[0]][pkt_coords[1]][VC0]);
         route->push_back(_westbound_pipes[pkt_coords[0]][pkt_coords[1]][VC0]);
 
-        if (_queue_type == LOSSLESS_INPUT || _queue_type == LOSSLESS_INPUT_ECN) {
+        if (_switch_queue_type == LOSSLESS_INPUT || _switch_queue_type == LOSSLESS_INPUT_ECN) {
             // Add matching lossless input queue (current queue's remote endpoint)
             route->push_back(
                 _west_egress_queues[pkt_coords[0]][pkt_coords[1]][VC0]->getRemoteEndpoint());
@@ -627,13 +746,25 @@ void TwoDimensionalTorusTopology::_add_westward_route_to(Route* route,
                 _east_egress_queues[reverse_pkt_coords[0]][reverse_pkt_coords[1]][VC0]);
             reverse_route->push_back(
                 _eastbound_pipes[reverse_pkt_coords[0]][reverse_pkt_coords[1]][VC0]);
-            if (_queue_type == LOSSLESS_INPUT || _queue_type == LOSSLESS_INPUT_ECN) {
+            if (_switch_queue_type == LOSSLESS_INPUT || _switch_queue_type == LOSSLESS_INPUT_ECN) {
                 reverse_route->push_back(
                     _east_egress_queues[reverse_pkt_coords[0]][reverse_pkt_coords[1]][VC0]
                         ->getRemoteEndpoint());
             }
             reverse_pkt_coords[1] =
                 (reverse_pkt_coords[1] == _m - 1) ? 0 : reverse_pkt_coords[1] + 1;
+        }
+    }
+
+    // If dest is reached, route packet from switch to host
+    if (pkt_coords[0] == dest_coords[0]) {
+        route->push_back(_switch_to_host_queues[dest_coords[0]][dest_coords[1]][dest_coords[2]]);
+        route->push_back(_switch_to_host_pipes[dest_coords[0]][dest_coords[1]][dest_coords[2]]);
+        if (reverse) {
+            reverse_route->push_back(
+                _switch_to_host_queues[src_coords[0]][src_coords[1]][src_coords[2]]);
+            reverse_route->push_back(
+                _switch_to_host_pipes[src_coords[0]][src_coords[1]][src_coords[2]]);
         }
     }
 
@@ -666,16 +797,31 @@ void TwoDimensionalTorusTopology::_add_northward_route_to(Route* route,
     Route* reverse_route = nullptr;
 
     if (reverse) {
-        // Reconstruct reverse route
+        // Reconstruct reverse route (can't use route->reverse() directly as it's a const)
         // NOTE: if src and dest have the same X coords, then route's reverse was never initialised
         reverse_route = (route->reverse() == nullptr) ? new Route() : route->reverse()->clone();
+    }
+
+    // If route wasn't initialised because x == x', do it here by pushing packets from host to
+    // switch
+    if (pkt_coords[1] == dest_coords[1]) {
+        route->push_back(_host_to_switch_queues[pkt_coords[0]][pkt_coords[1]][pkt_coords[2]]);
+        route->push_back(_host_to_switch_pipes[pkt_coords[0]][pkt_coords[1]][pkt_coords[2]]);
+        if (reverse) {
+            reverse_route->push_back(
+                _host_to_switch_queues[reverse_pkt_coords[0]][reverse_pkt_coords[1]]
+                                      [reverse_pkt_coords[2]]);
+            reverse_route->push_back(
+                _host_to_switch_pipes[reverse_pkt_coords[0]][reverse_pkt_coords[1]]
+                                     [reverse_pkt_coords[2]]);
+        }
     }
 
     while (pkt_coords[0] != dest_coords[0]) {
         route->push_back(_north_egress_queues[pkt_coords[0]][pkt_coords[1]][VC1]);
         route->push_back(_northbound_pipes[pkt_coords[0]][pkt_coords[1]][VC1]);
 
-        if (_queue_type == LOSSLESS_INPUT || _queue_type == LOSSLESS_INPUT_ECN) {
+        if (_switch_queue_type == LOSSLESS_INPUT || _switch_queue_type == LOSSLESS_INPUT_ECN) {
             route->push_back(
                 _north_egress_queues[pkt_coords[0]][pkt_coords[1]][VC1]->getRemoteEndpoint());
         }
@@ -686,7 +832,7 @@ void TwoDimensionalTorusTopology::_add_northward_route_to(Route* route,
                 _south_egress_queues[reverse_pkt_coords[0]][reverse_pkt_coords[1]][VC1]);
             reverse_route->push_back(
                 _southbound_pipes[reverse_pkt_coords[0]][reverse_pkt_coords[1]][VC1]);
-            if (_queue_type == LOSSLESS_INPUT || _queue_type == LOSSLESS_INPUT_ECN) {
+            if (_switch_queue_type == LOSSLESS_INPUT || _switch_queue_type == LOSSLESS_INPUT_ECN) {
                 reverse_route->push_back(
                     _south_egress_queues[reverse_pkt_coords[0]][reverse_pkt_coords[1]][VC1]
                         ->getRemoteEndpoint());
@@ -696,9 +842,19 @@ void TwoDimensionalTorusTopology::_add_northward_route_to(Route* route,
         }
     }
 
+    // Dest is reached, so route packet from switch to host
+    route->push_back(_switch_to_host_queues[dest_coords[0]][dest_coords[1]][dest_coords[2]]);
+    route->push_back(_switch_to_host_pipes[dest_coords[0]][dest_coords[1]][dest_coords[2]]);
+    if (reverse) {
+        reverse_route->push_back(
+            _switch_to_host_queues[src_coords[0]][src_coords[1]][src_coords[2]]);
+        reverse_route->push_back(
+            _switch_to_host_pipes[src_coords[0]][src_coords[1]][src_coords[2]]);
+    }
+
     // Overwrite reverse route to update
     if (reverse) {
-        // Avoid memory leak, as we dereference the old reverse route and won-t reference it again
+        // Avoid memory leak, as we dereference the old reverse route and won't reference it again
         delete route->reverse();
         route->set_reverse(reverse_route);
         reverse_route->set_reverse(route);
@@ -715,15 +871,29 @@ void TwoDimensionalTorusTopology::_add_southward_route_to(Route* route,
     Route* reverse_route = nullptr;
 
     if (reverse) {
-        // Reconstruct reverse route
         reverse_route = (route->reverse() == nullptr) ? new Route() : route->reverse()->clone();
+    }
+
+    // If route wasn't initialised because x == x', do it here by pushing packets from host to
+    // switch
+    if (pkt_coords[1] == dest_coords[1]) {
+        route->push_back(_host_to_switch_queues[pkt_coords[0]][pkt_coords[1]][pkt_coords[2]]);
+        route->push_back(_host_to_switch_pipes[pkt_coords[0]][pkt_coords[1]][pkt_coords[2]]);
+        if (reverse) {
+            reverse_route->push_back(
+                _host_to_switch_queues[reverse_pkt_coords[0]][reverse_pkt_coords[1]]
+                                      [reverse_pkt_coords[2]]);
+            reverse_route->push_back(
+                _host_to_switch_pipes[reverse_pkt_coords[0]][reverse_pkt_coords[1]]
+                                     [reverse_pkt_coords[2]]);
+        }
     }
 
     while (pkt_coords[0] != dest_coords[0]) {
         route->push_back(_south_egress_queues[pkt_coords[0]][pkt_coords[1]][VC1]);
         route->push_back(_southbound_pipes[pkt_coords[0]][pkt_coords[1]][VC1]);
 
-        if (_queue_type == LOSSLESS_INPUT || _queue_type == LOSSLESS_INPUT_ECN) {
+        if (_switch_queue_type == LOSSLESS_INPUT || _switch_queue_type == LOSSLESS_INPUT_ECN) {
             route->push_back(
                 _south_egress_queues[pkt_coords[0]][pkt_coords[1]][VC1]->getRemoteEndpoint());
         }
@@ -734,7 +904,7 @@ void TwoDimensionalTorusTopology::_add_southward_route_to(Route* route,
                 _north_egress_queues[reverse_pkt_coords[0]][reverse_pkt_coords[1]][VC1]);
             reverse_route->push_back(
                 _northbound_pipes[reverse_pkt_coords[0]][reverse_pkt_coords[1]][VC1]);
-            if (_queue_type == LOSSLESS_INPUT || _queue_type == LOSSLESS_INPUT_ECN) {
+            if (_switch_queue_type == LOSSLESS_INPUT || _switch_queue_type == LOSSLESS_INPUT_ECN) {
                 reverse_route->push_back(
                     _north_egress_queues[reverse_pkt_coords[0]][reverse_pkt_coords[1]][VC1]
                         ->getRemoteEndpoint());
@@ -744,9 +914,17 @@ void TwoDimensionalTorusTopology::_add_southward_route_to(Route* route,
         }
     }
 
-    // Overwrite reverse route to update
+    // Dest is reached, so route packet from switch to host
+    route->push_back(_switch_to_host_queues[dest_coords[0]][dest_coords[1]][dest_coords[2]]);
+    route->push_back(_switch_to_host_pipes[dest_coords[0]][dest_coords[1]][dest_coords[2]]);
     if (reverse) {
-        // Avoid memory leak, as we dereference the old reverse route and won-t reference it again
+        reverse_route->push_back(
+            _switch_to_host_queues[src_coords[0]][src_coords[1]][src_coords[2]]);
+        reverse_route->push_back(
+            _switch_to_host_pipes[src_coords[0]][src_coords[1]][src_coords[2]]);
+    }
+
+    if (reverse) {
         delete route->reverse();
         route->set_reverse(reverse_route);
         reverse_route->set_reverse(route);
@@ -760,4 +938,13 @@ void TwoDimensionalTorusTopology::_add_y_routes_to(Route* route1,
                                                    bool reverse) {
     _add_northward_route_to(route1, src_coords, dest_coords, reverse);
     _add_southward_route_to(route2, src_coords, dest_coords, reverse);
+}
+
+void TwoDimensionalTorusTopology::add_switch_loggers(Logfile& logfile,
+                                                     simtime_picosec sample_period) {
+    for (uint32_t i = 0; i < _n; i++) {
+        for (uint32_t j = 0; j < _m; j++) {
+            _switches[i][j]->add_logger(logfile, sample_period);
+        }
+    }
 }
