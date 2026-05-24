@@ -32,6 +32,12 @@
 #define VC0 0
 #define VC1 1
 
+#define PI 3.14159265358979323846
+// Earth's radius in m, needed to compute latencies
+#define R_EARTH_M 6378000
+// Speed of light in mps
+#define C_MPS 299792458
+
 //! Minimal constructor used to set default parameters
 TwoDimensionalTorusTopology::TwoDimensionalTorusTopology(Logfile* logfile,
                                                          QueueLoggerFactory* q_log_factory,
@@ -52,6 +58,7 @@ TwoDimensionalTorusTopology::TwoDimensionalTorusTopology(Logfile* logfile,
       _routing_strategy(DIMENSION_ORDERED),
       _is_constellation(is_constellation),
       _latency(0),
+      _host_switch_latency(0),
       _altitude_in_m(0),
       _inclination_in_deg(0) {};
 
@@ -72,6 +79,7 @@ TwoDimensionalTorusTopology::TwoDimensionalTorusTopology(Logfile* logfile,
                                                          torus_routing_strategy routing_strategy,
                                                          bool is_constellation,
                                                          simtime_picosec latency,
+                                                         simtime_picosec host_switch_latency,
                                                          uint32_t altitude,
                                                          float_t inclination)
     : TwoDimensionalTorusTopology(logfile, q_log_factory, n, m, is_constellation) {
@@ -87,6 +95,7 @@ TwoDimensionalTorusTopology::TwoDimensionalTorusTopology(Logfile* logfile,
     } else {
         set_switch_latency(latency);
     }
+    set_host_switch_latency(host_switch_latency);
 
     // Allocating switches, queues, and pipes' vectors
     // NOTE: resize() initialises vectors with values' default type, in this case nullptr
@@ -152,8 +161,8 @@ TwoDimensionalTorusTopology::TwoDimensionalTorusTopology(Logfile* logfile,
                 get_coords_of_host[host_id++] = {i, j, host};
                 // Create Pipes
                 // TODO: create a switch-host latency field
-                _host_to_switch_pipes[i][j][host] = new Pipe(_latency, *_eventlist);
-                _switch_to_host_pipes[i][j][host] = new Pipe(_latency, *_eventlist);
+                _host_to_switch_pipes[i][j][host] = new Pipe(_host_switch_latency, *_eventlist);
+                _switch_to_host_pipes[i][j][host] = new Pipe(_host_switch_latency, *_eventlist);
                 _host_to_switch_pipes[i][j][host]->setName("Pipe_Host" + ntoa(host) + "->Switch(" +
                                                            ntoa(j) + ", " + ntoa(i) + ")");
                 _switch_to_host_pipes[i][j][host]->setName("Pipe_Switch(" + ntoa(j) + ", " +
@@ -176,16 +185,16 @@ TwoDimensionalTorusTopology::TwoDimensionalTorusTopology(Logfile* logfile,
                 // --- Create Pipes ---
                 if (is_constellation) {
                     _northbound_pipes[i][j][vc] =
-                        new InterSatelliteLink(InterSatelliteLink::ISL_Type::INTERPLANE,
+                        new InterSatelliteLink(_n, _m, InterSatelliteLink::ISL_Type::INTERPLANE,
                                                _inclination_in_deg, _altitude_in_m);
                     _eastbound_pipes[i][j][vc] =
-                        new InterSatelliteLink(InterSatelliteLink::ISL_Type::INTRAPLANE,
+                        new InterSatelliteLink(_n, _m, InterSatelliteLink::ISL_Type::INTRAPLANE,
                                                _inclination_in_deg, _altitude_in_m);
                     _southbound_pipes[i][j][vc] =
-                        new InterSatelliteLink(InterSatelliteLink::ISL_Type::INTERPLANE,
+                        new InterSatelliteLink(_n, _m, InterSatelliteLink::ISL_Type::INTERPLANE,
                                                _inclination_in_deg, _altitude_in_m);
                     _westbound_pipes[i][j][vc] =
-                        new InterSatelliteLink(InterSatelliteLink::ISL_Type::INTRAPLANE,
+                        new InterSatelliteLink(_n, _m, InterSatelliteLink::ISL_Type::INTRAPLANE,
                                                _inclination_in_deg, _altitude_in_m);
                 } else {
                     _northbound_pipes[i][j][vc] = new Pipe(_latency, *_eventlist);
@@ -253,10 +262,6 @@ TwoDimensionalTorusTopology::TwoDimensionalTorusTopology(Logfile* logfile,
                     // E.g.: to NorthEgressQueue associate opposite Switch's SouthIngressQueue
                     // So determine coords of opposite switch
                     uint32_t n_i, n_j, e_i, e_j, s_i, s_j, w_i, w_j;
-
-                    // TODO: when in is_constellation mode, latency will be 0, and lossless input
-                    // queues, which use callback Pipes with inputted latency, will not function as
-                    // wanted. Find a way around that
 
                     // Simulate wrap-around when network edge is reached
                     n_i = (i == 0) ? _n - 1 : i - 1;
@@ -396,13 +401,38 @@ void TwoDimensionalTorusTopology::set_constellation_params(uint32_t altitude, fl
     } else {
         _inclination_in_deg = inclination;
     }
-    // TODO: since latency will still be used by lossless ingress queues' callback pipes, we cannot
-    // leave it at 0. Instead, compute the fuxed intraplane latency and use that, all the while
-    // giving the warning that that's what's happening
+
+    // NOTE: since latency will still be used by lossless ingress queues' callback pipes, we cannot
+    // leave it at 0. Instead, compute the fuxed intraplane latency and use that
+    simtime_picosec latency = compute_average_interplane_latency_ps();
+    set_switch_latency(latency);
 }
 
 void TwoDimensionalTorusTopology::set_switch_latency(simtime_picosec latency) {
     _latency = latency;
+}
+
+void TwoDimensionalTorusTopology::set_host_switch_latency(simtime_picosec latency) {
+    _host_switch_latency = latency;
+}
+
+double square(double x) {
+    return x * x;
+}
+
+/*
+ * The distance formula used can be found in the paper "QoS-Aware Resource Placement For LEO
+ * Satellite Edge Computing" by T. Pfandzelter and D. Bermbach.
+ * Since it computes an average, it doesn't need additional input parameters.
+ * It makes use of the complete elliptic integral of the second kind.
+ */
+simtime_picosec TwoDimensionalTorusTopology::compute_average_interplane_latency_ps() {
+    double factor1 = sqrt(2 * (1 - cos(2 * PI / _n)));
+    double factor2 = ellint_2l((1 - square(cos(_inclination_in_deg * PI / 180))), PI / 2);
+
+    double avg_dist = (2 / PI) * (_altitude_in_m + R_EARTH_M) * factor1 * factor2;
+    double latency_s = avg_dist / C_MPS;
+    return timeFromSec(latency_s);
 }
 
 Queue* TwoDimensionalTorusTopology::alloc_host_queue(QueueLogger* queue_logger,
@@ -523,21 +553,21 @@ vector<const Route*>* TwoDimensionalTorusTopology::get_bidir_paths(uint32_t src,
 
         // 1. Eastward case: (x < x' && wrapping around to the west is slower) || (x > x' &&
         // wrapping around to the east is faster)
-        if (((pkt_coords[1] < dest_coords[1]) && (dest_coords[1] - pkt_coords[1] < _m / 2)) ||
-            ((pkt_coords[1] > dest_coords[1]) && (pkt_coords[1] - dest_coords[1] > _m / 2))) {
+        if (((pkt_coords[1] < dest_coords[1]) && ((dest_coords[1] - pkt_coords[1]) * 2 < _m)) ||
+            ((pkt_coords[1] > dest_coords[1]) && ((pkt_coords[1] - dest_coords[1]) * 2 > _m))) {
             // Create single eastward route
             _add_eastward_route_to(route_src_dest, pkt_coords, dest_coords, reverse);
         }
 
         // 2. Westward case: (x > x' && wrapping around to the east is slower) || (x < x' &&
         // wrapping around to he west is faster)
-        if (((pkt_coords[1] > dest_coords[1]) && (pkt_coords[1] - dest_coords[1] < _m / 2)) ||
-            ((pkt_coords[1] < dest_coords[1]) && (dest_coords[1] - pkt_coords[1] > _m / 2))) {
+        if (((pkt_coords[1] > dest_coords[1]) && ((pkt_coords[1] - dest_coords[1]) * 2 < _m)) ||
+            ((pkt_coords[1] < dest_coords[1]) && ((dest_coords[1] - pkt_coords[1]) * 2 > _m))) {
             // Create single westward route
             _add_westward_route_to(route_src_dest, pkt_coords, dest_coords, reverse);
         }
 
-        // 3. Two min routes: ( |x->x'| == |x'->x| == _m/2)
+        // 3. Two min routes: ( |x->x'| == |x'->x| == _m/2), can only happen when m is even
         if ((pkt_coords[1] - dest_coords[1] == _m / 2) ||
             (dest_coords[1] - pkt_coords[1] == _m / 2)) {
             // Add both east and west routes
@@ -561,8 +591,9 @@ vector<const Route*>* TwoDimensionalTorusTopology::get_bidir_paths(uint32_t src,
 
         // 1. Northward case: (y < y' && southward wrap-around is slower) || (y > y' &&
         // wrap-around north is faster)
-        if (((pkt_coords[0] < dest_coords[0]) && (dest_coords[0] - pkt_coords[0] < _n / 2)) ||
-            ((pkt_coords[0] > dest_coords[0]) && (pkt_coords[0] - dest_coords[0] > _n / 2))) {
+        // Use ceiling as C++ truncates rather than round integers
+        if (((pkt_coords[0] < dest_coords[0]) && ((dest_coords[0] - pkt_coords[0]) * 2 < _n)) ||
+            ((pkt_coords[0] > dest_coords[0]) && ((pkt_coords[0] - dest_coords[0]) * 2 > _n))) {
             // 1. We start with a single route
             _add_northward_route_to(route_src_dest, pkt_coords, dest_coords, reverse);
 
@@ -574,8 +605,8 @@ vector<const Route*>* TwoDimensionalTorusTopology::get_bidir_paths(uint32_t src,
 
         // 2. Southward case: (y > y' && wrap-around to the north is slower) || (y < y' &&
         // wrap-around to the south is faster)
-        if (((pkt_coords[0] > dest_coords[0]) && (pkt_coords[0] - dest_coords[0] < _n / 2)) ||
-            ((pkt_coords[0] < dest_coords[0]) && (dest_coords[0] - pkt_coords[0] > _n / 2))) {
+        if (((pkt_coords[0] > dest_coords[0]) && ((pkt_coords[0] - dest_coords[0]) * 2 < _n)) ||
+            ((pkt_coords[0] < dest_coords[0]) && ((dest_coords[0] - pkt_coords[0]) * 2 > _n))) {
             // 1. Single route
             _add_southward_route_to(route_src_dest, pkt_coords, dest_coords, reverse);
             if (route_src_dest_2 != nullptr) {
@@ -584,7 +615,7 @@ vector<const Route*>* TwoDimensionalTorusTopology::get_bidir_paths(uint32_t src,
             }
         }
 
-        // 3. Two min routes: (|y->y'| == |y-y'| == _n/2)
+        // 3. Two min routes: (|y->y'| == |y-y'| == _n/2), can only happen when n is even
         if ((pkt_coords[0] - dest_coords[0] == _n / 2) ||
             (dest_coords[0] - pkt_coords[0] == _n / 2)) {
             // 1. Single route: copy route_src_dest into route3, so as to create one variant that
@@ -947,4 +978,12 @@ void TwoDimensionalTorusTopology::add_switch_loggers(Logfile& logfile,
             _switches[i][j]->add_logger(logfile, sample_period);
         }
     }
+}
+
+/*
+ * Not implemented, as it is unclear what a host's neighbour is (linked to same switch, or hosts
+ * linked to neighbouring switches?)
+ */
+vector<uint32_t>* TwoDimensionalTorusTopology::get_neighbours(uint32_t src) {
+    return nullptr;
 }

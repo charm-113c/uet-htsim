@@ -3,6 +3,7 @@
 #define INTERSATELLITE_LINK
 
 #include <cstdint>
+#include "config.h"
 #include "pipe.h"
 
 /**
@@ -30,14 +31,26 @@ public:
         INTERPLANE,
     };
 
-    InterSatelliteLink(ISL_Type isl_type, uint32_t orbital_inclination, uint32_t _altitude);
+    InterSatelliteLink(uint32_t constellation_n,
+                       uint32_t constellation_m,
+                       ISL_Type isl_type,
+                       uint32_t orbital_inclination,
+                       uint32_t altitude);
 
     void receivePacket(Packet& pkt) override;  // inherited from PacketSink
-    void doNextEvent() override;               // inherited from EventSource
 
 private:
+    uint32_t _constellation_n;
+    uint32_t _constellation_m;
+
+    ISL_Type _isl_type;
     uint32_t _orbital_inclination_in_deg;
-    uint32_t _altitude;
+    uint32_t _altitude_m;
+
+    simtime_picosec _latency;
+
+    simtime_picosec _compute_intraplane_latency_ps();
+    simtime_picosec _compute_interplane_latency_ps(simtime_picosec current_time);
 };
 
 #endif  //! INTERSATELLITE_LINK

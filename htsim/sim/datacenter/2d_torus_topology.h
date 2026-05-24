@@ -69,7 +69,7 @@ public:
     //! n*m 2D vector of switches
     vector<vector<Switch*>> _switches;
     //! Each switch is assigned one or more servers/hosts
-    //! So we model those hosts' egress queues and the pipes between them
+    //! So we model those hosts' egress queues and pipes
     //! 3D vector: first 2D correspond to switch, 3rd is the associated hosts
     vector<vector<vector<Queue*>>> _host_to_switch_queues;
     vector<vector<vector<Queue*>>> _switch_to_host_queues;
@@ -123,6 +123,7 @@ public:
                                 torus_routing_strategy routing_strategy,
                                 bool is_constellation,
                                 simtime_picosec latency,
+                                simtime_picosec host_switch_latency,
                                 uint32_t altitude,
                                 float_t inclination);
 
@@ -134,6 +135,29 @@ public:
     virtual void add_switch_loggers(Logfile& log, simtime_picosec sample_period);
     // NOTE: while Switches and Queues can be logged (see constructor for queues), the same isn't
     // true for Pipes, likely since they represent links
+
+    void set_n_virtual_channels();
+    void set_hosts_per_switch(uint32_t hosts_per_switch);
+    void set_queue_params(queue_type switch_queue_type,
+                          queue_type host_queue_type,
+                          mem_b queue_size,
+                          bool disable_trim,
+                          uint16_t trim_size,
+                          mem_b ecn_high,
+                          mem_b ecn_low);
+    // TODO: create different linkspeeds for different components
+    void set_linkspeed(linkspeed_bps linkspeed);
+    void set_routing_strategy(torus_routing_strategy routing_strategy);
+    void set_constellation_params(uint32_t altitude, float_t inclination);
+    void set_switch_latency(simtime_picosec latency);
+    void set_host_switch_latency(simtime_picosec host_switch_latency);
+
+    //! Hosts (servers) may have multiple packet flows, so need to be allocated specific queue types
+    Queue* alloc_host_queue(QueueLogger* queue_logger, linkspeed_bps linkspeed_bps);
+    //! By contrast, switch's queues only care about receiving packets and forwarding them
+    Queue* alloc_queue(QueueLogger* queue_logger, linkspeed_bps linkspeed_bps, mem_b queue_size);
+
+    simtime_picosec compute_average_interplane_latency_ps();
 
 private:
     //! In satellite constellation, N is the number of orbital planes and M is the number of
@@ -152,33 +176,14 @@ private:
     torus_routing_strategy _routing_strategy;
 
     bool _is_constellation;
-    //! Latency is only used when *not* simulating a constellation, and thus can be considered
-    //! constant
+    //! Latency is really only used when *not* simulating a constellation, and thus can be
+    //! considered constant
     simtime_picosec _latency;
+    simtime_picosec _host_switch_latency;
     //! If simulating a constellation, shell altitude and orbital inclination allows calculating
     //! latency between nodes/satellites
     uint32_t _altitude_in_m;
     float_t _inclination_in_deg;
-
-    void set_n_virtual_channels();
-    void set_hosts_per_switch(uint32_t hosts_per_switch);
-    void set_queue_params(queue_type switch_queue_type,
-                          queue_type host_queue_type,
-                          mem_b queue_size,
-                          bool disable_trim,
-                          uint16_t trim_size,
-                          mem_b ecn_high,
-                          mem_b ecn_low);
-    // TODO: create different linkspeeds for different components
-    void set_linkspeed(linkspeed_bps linkspeed);
-    void set_routing_strategy(torus_routing_strategy routing_strategy);
-    void set_constellation_params(uint32_t altitude, float_t inclination);
-    void set_switch_latency(simtime_picosec latency);
-
-    //! Hosts (servers) may have multiple packet flows, so need to be allocated specific queue types
-    Queue* alloc_host_queue(QueueLogger* queue_logger, linkspeed_bps linkspeed_bps);
-    //! By contrast, switch's queues only care about receiving packets and forwarding them
-    Queue* alloc_queue(QueueLogger* queue_logger, linkspeed_bps linkspeed_bps, mem_b queue_size);
 
     void _add_eastward_route_to(Route* route,
                                 const vector<uint32_t>& src_coords,
