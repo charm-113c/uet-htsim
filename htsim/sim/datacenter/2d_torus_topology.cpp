@@ -55,7 +55,7 @@ TwoDimensionalTorusTopology::TwoDimensionalTorusTopology(Logfile* logfile,
       _queue_size_b(0),
       _composite_q_cfg(),
       _linkspeed_bps(0),
-      _routing_strategy(DIMENSION_ORDERED),
+      _routing_strategy(DIMENSION_ORDER),
       _is_constellation(is_constellation),
       _latency(0),
       _host_switch_latency(0),
@@ -139,7 +139,8 @@ TwoDimensionalTorusTopology::TwoDimensionalTorusTopology(Logfile* logfile,
             // Save id mapping
             get_coords_of_switch[id] = {i, j};
 
-            _switches[i][j] = new TwoDimensionalTorusSwitch(_eventlist, id++, _routing_strategy);
+            _switches[i][j] =
+                new TwoDimensionalTorusSwitch(_eventlist, this, id++, _routing_strategy);
             _switches[i][j]->setName("Switch_(" + ntoa(i) + ", " + ntoa(j) + ")");
         }
     }
@@ -256,49 +257,58 @@ TwoDimensionalTorusTopology::TwoDimensionalTorusTopology(Logfile* logfile,
                 _switches[i][j]->addPort(_south_egress_queues[i][j][vc]);
                 _switches[i][j]->addPort(_west_egress_queues[i][j][vc]);
 
+                // Assign remote endpoint to egress queues:
+
+                // For instance, current switch's north egress queue will be paired with south
+                // ingress queue of the opposite switch, so determine coords of opposite switch
+                uint32_t n_i, n_j, e_i, e_j, s_i, s_j, w_i, w_j;
+                // Simulate wrap-around when network edge is reached
+                n_i = (i == 0) ? _n - 1 : i - 1;
+                n_j = j;
+
+                e_i = i;
+                e_j = (j == _m - 1) ? 0 : j + 1;
+
+                s_i = (i == _n - 1) ? 0 : i + 1;
+                s_j = j;
+
+                w_i = i;
+                w_j = (j == 0) ? _m - 1 : j - 1;
+
                 if (_switch_queue_type == LOSSLESS_INPUT ||
                     _switch_queue_type == LOSSLESS_INPUT_ECN) {
-                    // Create an ingress queue for the switch opposite to appropriate egress switch
-                    // E.g.: to NorthEgressQueue associate opposite Switch's SouthIngressQueue
-                    // So determine coords of opposite switch
-                    uint32_t n_i, n_j, e_i, e_j, s_i, s_j, w_i, w_j;
-
-                    // Simulate wrap-around when network edge is reached
-                    n_i = (i == 0) ? _n - 1 : i - 1;
-                    n_j = j;
+                    // Ingress queue vectors exist only to keep track of lossless input queues, so
+                    // that they may be deleted in the destructor. Otherwise, in its constructor a
+                    // LosslessInputQueue and its peer queue mutually set each other as remote
+                    // endpoints, so future reference to the  ingress queues will be through
+                    // _egress_queues->getRemoteEndpoint()
                     _south_ingress_queues[n_i][n_j][vc] = new LosslessInputQueue(
                         *_eventlist, _north_egress_queues[i][j][vc], _switches[n_i][n_j], _latency);
                     _south_ingress_queues[n_i][n_j][vc]->setName("SouthIngressQueue_(" + ntoa(n_i) +
                                                                  ", " + ntoa(n_j) + ")");
-                    e_i = i;
-                    e_j = (j == _m - 1) ? 0 : j + 1;
+
                     _west_ingress_queues[e_i][e_j][vc] = new LosslessInputQueue(
                         *_eventlist, _east_egress_queues[i][j][vc], _switches[e_i][e_j], _latency);
                     _west_ingress_queues[e_i][e_j][vc]->setName("WestIngressQueue_(" + ntoa(e_i) +
                                                                 ", " + ntoa(e_j) + ")");
-                    s_i = (i == _n - 1) ? 0 : i + 1;
-                    s_j = j;
+
                     _north_ingress_queues[s_i][s_j][vc] = new LosslessInputQueue(
                         *_eventlist, _south_egress_queues[i][j][vc], _switches[s_i][s_j], _latency);
                     _north_ingress_queues[s_i][s_j][vc]->setName("NorthIngressQueue_(" + ntoa(s_i) +
                                                                  ", " + ntoa(s_j) + ")");
-                    w_i = i;
-                    w_j = (j == 0) ? _m - 1 : j - 1;
+
                     _east_ingress_queues[w_i][w_j][vc] = new LosslessInputQueue(
                         *_eventlist, _west_egress_queues[i][j][vc], _switches[w_i][w_j], _latency);
                     _east_ingress_queues[w_i][w_j][vc]->setName("EastIngressQueue_(" + ntoa(w_i) +
                                                                 ", " + ntoa(w_j) + ")");
                 } else {
-                    // Do nothing.
-                    // Ingress queues are never used, except for the lossless input case.
-                    // Egress queues do the heavy lifting during simulations.
-                    // The only job of ingress queues is to store lossless input queues; something
-                    // that wasn't done in the fat tree implementation, likely because the lossless
-                    // input queue type was added after a first version of the fat tree was
-                    // completed, and keeping track of the needed ingress queues would require
-                    // doubling the number of queue vectors, which is already significant in fat
-                    // tree. That would explain the blatant memory leak.
-                    // In our case, keeping track of ingress queues is easy so we do it.
+                    // It is still necessary to set the egress queues' endpoints as their opposite
+                    // switch, this will be needed by switches to receive packets when using
+                    // lossless queues
+                    _north_egress_queues[i][j][vc]->setRemoteEndpoint(_switches[n_i][n_j]);
+                    _east_egress_queues[i][j][vc]->setRemoteEndpoint(_switches[e_i][e_j]);
+                    _south_egress_queues[i][j][vc]->setRemoteEndpoint(_switches[s_i][s_j]);
+                    _west_egress_queues[i][j][vc]->setRemoteEndpoint(_switches[w_i][w_j]);
                 }
 
                 // --------------------
@@ -361,7 +371,7 @@ void TwoDimensionalTorusTopology::set_routing_strategy(torus_routing_strategy rs
 
 void TwoDimensionalTorusTopology::set_n_virtual_channels() {
     // Two VCs for dimension-ordered, 3 for minimum adaptive
-    _n_virtual_channels = (_routing_strategy == DIMENSION_ORDERED) ? 2 : 3;
+    _n_virtual_channels = (_routing_strategy == DIMENSION_ORDER) ? 2 : 3;
 }
 
 void TwoDimensionalTorusTopology::set_queue_params(queue_type switch_queue_type,
@@ -540,9 +550,13 @@ vector<const Route*>* TwoDimensionalTorusTopology::get_bidir_paths(uint32_t src,
 
     // In dimension-ordered routing, we use two virtual channels per link.
     // Then, when routing a packet from (x,y) to (x', y'), we first route it over one dimension, in
-    // our case over the X-dimension until the packet reaches coordinates (x', y) using VC0, and
-    // only then we route it over the Y-dimension using VC1.
-    // This ensures deadlock-free and minimal path routing.
+    // our case over the X-dimension first, until the packet reach x', and only then is it routed
+    // along the Y dimension, until the packet reaches y'.
+    // By default, the packet starts on VC0. However, if for instance when travelling across the X
+    // dimension, the packet takes a wrap around link (i.e. the packet went from (0, y) to (m-1, y)
+    // or vice-versa), then after wrapping around the packet will use VC1. Doing so eliminates
+    // possible loops on the X dimension, and subsequently deadlocks. The same applies on the Y
+    // dimension. This ensures deadlock-free and minimal path routing.
 
     // X-dimension routing
     if (pkt_coords[1] != dest_coords[1]) {
@@ -662,7 +676,7 @@ vector<const Route*>* TwoDimensionalTorusTopology::get_bidir_paths(uint32_t src,
  * Constructs eastward route on X-dimension from source's x to destination's x. This method
  * doesn't handle Y-dimension routing.
  * The construction follows dimension-ordered routing starting from the X-dimension, and so uses
- * VC0.
+ * VC0 until a possible wrap-around, after which it uses VC1.
  */
 void TwoDimensionalTorusTopology::_add_eastward_route_to(Route* route,
                                                          const vector<uint32_t>& src_coords,
@@ -670,6 +684,8 @@ void TwoDimensionalTorusTopology::_add_eastward_route_to(Route* route,
                                                          bool reverse) {
     vector<uint32_t> pkt_coords = src_coords;
     vector<uint32_t> reverse_pkt_coords = dest_coords;
+    bool has_wrapped_around = false;
+    bool rev_has_wrapped_around = false;
 
     Route* reverse_route = (reverse) ? new Route() : nullptr;
 
@@ -687,30 +703,64 @@ void TwoDimensionalTorusTopology::_add_eastward_route_to(Route* route,
     // Then move east
     while (pkt_coords[1] != dest_coords[1]) {
         // Keep moving east, using wrap-around if necessary
-        route->push_back(_east_egress_queues[pkt_coords[0]][pkt_coords[1]][VC0]);
-        route->push_back(_eastbound_pipes[pkt_coords[0]][pkt_coords[1]][VC0]);
+        if (!has_wrapped_around) {
+            route->push_back(_east_egress_queues[pkt_coords[0]][pkt_coords[1]][VC0]);
+            route->push_back(_eastbound_pipes[pkt_coords[0]][pkt_coords[1]][VC0]);
+        } else {
+            route->push_back(_east_egress_queues[pkt_coords[0]][pkt_coords[1]][VC1]);
+            route->push_back(_eastbound_pipes[pkt_coords[0]][pkt_coords[1]][VC1]);
+        }
 
         if (_switch_queue_type == LOSSLESS_INPUT || _switch_queue_type == LOSSLESS_INPUT_ECN) {
             // Add matching lossless input queue (current queue's remote endpoint)
-            route->push_back(
-                _east_egress_queues[pkt_coords[0]][pkt_coords[1]][VC0]->getRemoteEndpoint());
+            if (!has_wrapped_around) {
+                route->push_back(
+                    _east_egress_queues[pkt_coords[0]][pkt_coords[1]][VC0]->getRemoteEndpoint());
+            } else {
+                route->push_back(
+                    _east_egress_queues[pkt_coords[0]][pkt_coords[1]][VC1]->getRemoteEndpoint());
+            }
         }
         // Increment x-coord with possible wrap-around
-        pkt_coords[1] = (pkt_coords[1] == _m - 1) ? 0 : pkt_coords[1] + 1;
+        if (pkt_coords[1] == _m - 1) {
+            pkt_coords[1] = 0;
+            has_wrapped_around = true;
+        } else {
+            pkt_coords[1]++;
+        }
 
         if (reverse) {
             // Apply same logic but from dest to src, so reverse route
-            reverse_route->push_back(
-                _west_egress_queues[reverse_pkt_coords[0]][reverse_pkt_coords[1]][VC0]);
-            reverse_route->push_back(
-                _westbound_pipes[reverse_pkt_coords[0]][reverse_pkt_coords[1]][VC0]);
-            if (_switch_queue_type == LOSSLESS_INPUT || _switch_queue_type == LOSSLESS_INPUT_ECN) {
+            if (!rev_has_wrapped_around) {
                 reverse_route->push_back(
-                    _west_egress_queues[reverse_pkt_coords[0]][reverse_pkt_coords[1]][VC0]
-                        ->getRemoteEndpoint());
+                    _west_egress_queues[reverse_pkt_coords[0]][reverse_pkt_coords[1]][VC0]);
+                reverse_route->push_back(
+                    _westbound_pipes[reverse_pkt_coords[0]][reverse_pkt_coords[1]][VC0]);
+            } else {
+                reverse_route->push_back(
+                    _west_egress_queues[reverse_pkt_coords[0]][reverse_pkt_coords[1]][VC1]);
+                reverse_route->push_back(
+                    _westbound_pipes[reverse_pkt_coords[0]][reverse_pkt_coords[1]][VC1]);
             }
-            reverse_pkt_coords[1] =
-                (reverse_pkt_coords[1] == 0) ? _m - 1 : reverse_pkt_coords[1] - 1;
+
+            if (_switch_queue_type == LOSSLESS_INPUT || _switch_queue_type == LOSSLESS_INPUT_ECN) {
+                if (!rev_has_wrapped_around) {
+                    reverse_route->push_back(
+                        _west_egress_queues[reverse_pkt_coords[0]][reverse_pkt_coords[1]][VC0]
+                            ->getRemoteEndpoint());
+                } else {
+                    reverse_route->push_back(
+                        _west_egress_queues[reverse_pkt_coords[0]][reverse_pkt_coords[1]][VC1]
+                            ->getRemoteEndpoint());
+                }
+            }
+
+            if (reverse_pkt_coords[1] == 0) {
+                reverse_pkt_coords[1] = _m - 1;
+                rev_has_wrapped_around = true;
+            } else {
+                reverse_pkt_coords[1]--;
+            }
         }
     }
 
@@ -736,7 +786,7 @@ void TwoDimensionalTorusTopology::_add_eastward_route_to(Route* route,
  * Constructs westward route on X-dimension from source's x to destination's x. This method
  * doesn't handle Y-dimension routing.
  * The construction follows dimension-ordered routing starting from the X-dimension, and so uses
- * VC0.
+ * VC0 until a possible wrap-around, after which it uses VC1.
  */
 void TwoDimensionalTorusTopology::_add_westward_route_to(Route* route,
                                                          const vector<uint32_t>& src_coords,
@@ -744,6 +794,8 @@ void TwoDimensionalTorusTopology::_add_westward_route_to(Route* route,
                                                          bool reverse) {
     vector<uint32_t> pkt_coords = src_coords;
     vector<uint32_t> reverse_pkt_coords = dest_coords;
+    bool has_wrapped_around = false;
+    bool rev_has_wrapped_around = false;
 
     Route* reverse_route = (reverse) ? new Route() : nullptr;
 
@@ -760,30 +812,64 @@ void TwoDimensionalTorusTopology::_add_westward_route_to(Route* route,
 
     while (pkt_coords[1] != dest_coords[1]) {
         // Keep moving west, using wrap-around if necessary
-        route->push_back(_west_egress_queues[pkt_coords[0]][pkt_coords[1]][VC0]);
-        route->push_back(_westbound_pipes[pkt_coords[0]][pkt_coords[1]][VC0]);
+        if (!has_wrapped_around) {
+            route->push_back(_west_egress_queues[pkt_coords[0]][pkt_coords[1]][VC0]);
+            route->push_back(_westbound_pipes[pkt_coords[0]][pkt_coords[1]][VC0]);
+        } else {
+            route->push_back(_west_egress_queues[pkt_coords[0]][pkt_coords[1]][VC1]);
+            route->push_back(_westbound_pipes[pkt_coords[0]][pkt_coords[1]][VC1]);
+        }
 
         if (_switch_queue_type == LOSSLESS_INPUT || _switch_queue_type == LOSSLESS_INPUT_ECN) {
             // Add matching lossless input queue (current queue's remote endpoint)
-            route->push_back(
-                _west_egress_queues[pkt_coords[0]][pkt_coords[1]][VC0]->getRemoteEndpoint());
+            if (!has_wrapped_around) {
+                route->push_back(
+                    _west_egress_queues[pkt_coords[0]][pkt_coords[1]][VC0]->getRemoteEndpoint());
+            } else {
+                route->push_back(
+                    _west_egress_queues[pkt_coords[0]][pkt_coords[1]][VC1]->getRemoteEndpoint());
+            }
         }
         // Decrement x-coord with possible wrap-around
-        pkt_coords[1] = (pkt_coords[1] == 0) ? _m - 1 : pkt_coords[1] - 1;
+        if (pkt_coords[1] == 0) {
+            pkt_coords[1] = _m - 1;
+            has_wrapped_around = true;
+        } else {
+            pkt_coords[1]--;
+        }
 
         if (reverse) {
             // Apply same logic but from dest to src, so reverse route
-            reverse_route->push_back(
-                _east_egress_queues[reverse_pkt_coords[0]][reverse_pkt_coords[1]][VC0]);
-            reverse_route->push_back(
-                _eastbound_pipes[reverse_pkt_coords[0]][reverse_pkt_coords[1]][VC0]);
-            if (_switch_queue_type == LOSSLESS_INPUT || _switch_queue_type == LOSSLESS_INPUT_ECN) {
+            if (!rev_has_wrapped_around) {
                 reverse_route->push_back(
-                    _east_egress_queues[reverse_pkt_coords[0]][reverse_pkt_coords[1]][VC0]
-                        ->getRemoteEndpoint());
+                    _east_egress_queues[reverse_pkt_coords[0]][reverse_pkt_coords[1]][VC0]);
+                reverse_route->push_back(
+                    _eastbound_pipes[reverse_pkt_coords[0]][reverse_pkt_coords[1]][VC0]);
+            } else {
+                reverse_route->push_back(
+                    _east_egress_queues[reverse_pkt_coords[0]][reverse_pkt_coords[1]][VC1]);
+                reverse_route->push_back(
+                    _eastbound_pipes[reverse_pkt_coords[0]][reverse_pkt_coords[1]][VC1]);
             }
-            reverse_pkt_coords[1] =
-                (reverse_pkt_coords[1] == _m - 1) ? 0 : reverse_pkt_coords[1] + 1;
+
+            if (_switch_queue_type == LOSSLESS_INPUT || _switch_queue_type == LOSSLESS_INPUT_ECN) {
+                if (!rev_has_wrapped_around) {
+                    reverse_route->push_back(
+                        _east_egress_queues[reverse_pkt_coords[0]][reverse_pkt_coords[1]][VC0]
+                            ->getRemoteEndpoint());
+                } else {
+                    reverse_route->push_back(
+                        _east_egress_queues[reverse_pkt_coords[0]][reverse_pkt_coords[1]][VC1]
+                            ->getRemoteEndpoint());
+                }
+            }
+
+            if (reverse_pkt_coords[1] == 0) {
+                reverse_pkt_coords[1] = _m - 1;
+                rev_has_wrapped_around = true;
+            } else {
+                reverse_pkt_coords[1]--;
+            }
         }
     }
 
@@ -824,6 +910,8 @@ void TwoDimensionalTorusTopology::_add_northward_route_to(Route* route,
                                                           bool reverse) {
     vector<uint32_t> pkt_coords = src_coords;
     vector<uint32_t> reverse_pkt_coords = dest_coords;
+    bool has_wrapped_around = false;
+    bool rev_has_wrapped_around = false;
 
     Route* reverse_route = nullptr;
 
@@ -849,27 +937,60 @@ void TwoDimensionalTorusTopology::_add_northward_route_to(Route* route,
     }
 
     while (pkt_coords[0] != dest_coords[0]) {
-        route->push_back(_north_egress_queues[pkt_coords[0]][pkt_coords[1]][VC1]);
-        route->push_back(_northbound_pipes[pkt_coords[0]][pkt_coords[1]][VC1]);
+        if (!has_wrapped_around) {
+            route->push_back(_north_egress_queues[pkt_coords[0]][pkt_coords[1]][VC0]);
+            route->push_back(_northbound_pipes[pkt_coords[0]][pkt_coords[1]][VC0]);
+        } else {
+            route->push_back(_north_egress_queues[pkt_coords[0]][pkt_coords[1]][VC1]);
+            route->push_back(_northbound_pipes[pkt_coords[0]][pkt_coords[1]][VC1]);
+        }
 
         if (_switch_queue_type == LOSSLESS_INPUT || _switch_queue_type == LOSSLESS_INPUT_ECN) {
-            route->push_back(
-                _north_egress_queues[pkt_coords[0]][pkt_coords[1]][VC1]->getRemoteEndpoint());
+            if (!has_wrapped_around) {
+                route->push_back(
+                    _north_egress_queues[pkt_coords[0]][pkt_coords[1]][VC0]->getRemoteEndpoint());
+            } else {
+                route->push_back(
+                    _north_egress_queues[pkt_coords[0]][pkt_coords[1]][VC1]->getRemoteEndpoint());
+            }
         }
-        pkt_coords[0] = (pkt_coords[0] == 0) ? _n - 1 : pkt_coords[0] - 1;
+
+        if (pkt_coords[0] == 0) {
+            pkt_coords[0] = _n - 1;
+            has_wrapped_around = true;
+        } else {
+            pkt_coords[0]--;
+        }
 
         if (reverse) {
-            reverse_route->push_back(
-                _south_egress_queues[reverse_pkt_coords[0]][reverse_pkt_coords[1]][VC1]);
-            reverse_route->push_back(
-                _southbound_pipes[reverse_pkt_coords[0]][reverse_pkt_coords[1]][VC1]);
-            if (_switch_queue_type == LOSSLESS_INPUT || _switch_queue_type == LOSSLESS_INPUT_ECN) {
+            if (!rev_has_wrapped_around) {
                 reverse_route->push_back(
-                    _south_egress_queues[reverse_pkt_coords[0]][reverse_pkt_coords[1]][VC1]
-                        ->getRemoteEndpoint());
+                    _south_egress_queues[reverse_pkt_coords[0]][reverse_pkt_coords[1]][VC0]);
+                reverse_route->push_back(
+                    _southbound_pipes[reverse_pkt_coords[0]][reverse_pkt_coords[1]][VC0]);
+            } else {
+                reverse_route->push_back(
+                    _south_egress_queues[reverse_pkt_coords[0]][reverse_pkt_coords[1]][VC1]);
+                reverse_route->push_back(
+                    _southbound_pipes[reverse_pkt_coords[0]][reverse_pkt_coords[1]][VC1]);
             }
-            reverse_pkt_coords[0] =
-                (reverse_pkt_coords[0] == _n - 1) ? 0 : reverse_pkt_coords[0] + 1;
+            if (_switch_queue_type == LOSSLESS_INPUT || _switch_queue_type == LOSSLESS_INPUT_ECN) {
+                if (!rev_has_wrapped_around) {
+                    reverse_route->push_back(
+                        _south_egress_queues[reverse_pkt_coords[0]][reverse_pkt_coords[1]][VC0]
+                            ->getRemoteEndpoint());
+                } else {
+                    reverse_route->push_back(
+                        _south_egress_queues[reverse_pkt_coords[0]][reverse_pkt_coords[1]][VC1]
+                            ->getRemoteEndpoint());
+                }
+            }
+            if (reverse_pkt_coords[0] == _n - 1) {
+                reverse_pkt_coords[0] = 0;
+                rev_has_wrapped_around = true;
+            } else {
+                reverse_pkt_coords[0]++;
+            }
         }
     }
 
@@ -898,6 +1019,8 @@ void TwoDimensionalTorusTopology::_add_southward_route_to(Route* route,
                                                           bool reverse) {
     vector<uint32_t> pkt_coords = src_coords;
     vector<uint32_t> reverse_pkt_coords = dest_coords;
+    bool has_wrapped_around = false;
+    bool rev_has_wrapped_around = false;
 
     Route* reverse_route = nullptr;
 
@@ -921,27 +1044,61 @@ void TwoDimensionalTorusTopology::_add_southward_route_to(Route* route,
     }
 
     while (pkt_coords[0] != dest_coords[0]) {
-        route->push_back(_south_egress_queues[pkt_coords[0]][pkt_coords[1]][VC1]);
-        route->push_back(_southbound_pipes[pkt_coords[0]][pkt_coords[1]][VC1]);
+        if (!has_wrapped_around) {
+            route->push_back(_south_egress_queues[pkt_coords[0]][pkt_coords[1]][VC0]);
+            route->push_back(_southbound_pipes[pkt_coords[0]][pkt_coords[1]][VC0]);
+        } else {
+            route->push_back(_south_egress_queues[pkt_coords[0]][pkt_coords[1]][VC1]);
+            route->push_back(_southbound_pipes[pkt_coords[0]][pkt_coords[1]][VC1]);
+        }
 
         if (_switch_queue_type == LOSSLESS_INPUT || _switch_queue_type == LOSSLESS_INPUT_ECN) {
-            route->push_back(
-                _south_egress_queues[pkt_coords[0]][pkt_coords[1]][VC1]->getRemoteEndpoint());
+            if (!has_wrapped_around) {
+                route->push_back(
+                    _south_egress_queues[pkt_coords[0]][pkt_coords[1]][VC0]->getRemoteEndpoint());
+
+            } else {
+                route->push_back(
+                    _south_egress_queues[pkt_coords[0]][pkt_coords[1]][VC1]->getRemoteEndpoint());
+            }
         }
-        pkt_coords[0] = (pkt_coords[0] == _n - 1) ? 0 : pkt_coords[0] + 1;
+        if (pkt_coords[0] == _n - 1) {
+            pkt_coords[0] = 0;
+            has_wrapped_around = true;
+        } else {
+            pkt_coords[0]++;
+        }
 
         if (reverse) {
-            reverse_route->push_back(
-                _north_egress_queues[reverse_pkt_coords[0]][reverse_pkt_coords[1]][VC1]);
-            reverse_route->push_back(
-                _northbound_pipes[reverse_pkt_coords[0]][reverse_pkt_coords[1]][VC1]);
-            if (_switch_queue_type == LOSSLESS_INPUT || _switch_queue_type == LOSSLESS_INPUT_ECN) {
+            if (!rev_has_wrapped_around) {
                 reverse_route->push_back(
-                    _north_egress_queues[reverse_pkt_coords[0]][reverse_pkt_coords[1]][VC1]
-                        ->getRemoteEndpoint());
+                    _north_egress_queues[reverse_pkt_coords[0]][reverse_pkt_coords[1]][VC0]);
+                reverse_route->push_back(
+                    _northbound_pipes[reverse_pkt_coords[0]][reverse_pkt_coords[1]][VC0]);
+            } else {
+                reverse_route->push_back(
+                    _north_egress_queues[reverse_pkt_coords[0]][reverse_pkt_coords[1]][VC1]);
+                reverse_route->push_back(
+                    _northbound_pipes[reverse_pkt_coords[0]][reverse_pkt_coords[1]][VC1]);
             }
-            reverse_pkt_coords[0] =
-                (reverse_pkt_coords[0] == 0) ? _n - 1 : reverse_pkt_coords[0] - 1;
+
+            if (_switch_queue_type == LOSSLESS_INPUT || _switch_queue_type == LOSSLESS_INPUT_ECN) {
+                if (!rev_has_wrapped_around) {
+                    reverse_route->push_back(
+                        _north_egress_queues[reverse_pkt_coords[0]][reverse_pkt_coords[1]][VC0]
+                            ->getRemoteEndpoint());
+                } else {
+                    reverse_route->push_back(
+                        _north_egress_queues[reverse_pkt_coords[0]][reverse_pkt_coords[1]][VC1]
+                            ->getRemoteEndpoint());
+                }
+            }
+            if (reverse_pkt_coords[0] == 0) {
+                reverse_pkt_coords[0] = _n - 1;
+                rev_has_wrapped_around = true;
+            } else {
+                reverse_pkt_coords[0]--;
+            }
         }
     }
 

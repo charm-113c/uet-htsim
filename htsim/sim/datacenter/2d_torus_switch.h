@@ -6,8 +6,10 @@
 #include "eventlist.h"
 #include "switch.h"
 
+class TwoDimensionalTorusTopology;
+
 typedef enum {
-    DIMENSION_ORDERED = 0,
+    DIMENSION_ORDER = 0,
     MINIMAL_ADAPTIVE_ALG = 1,
 } torus_routing_strategy;
 
@@ -23,6 +25,7 @@ public:
 
     // TODO: Don't forget to call Switch constructor with appropriate parameters if necessary
     TwoDimensionalTorusSwitch(EventList* eventlist,
+                              TwoDimensionalTorusTopology* torus,
                               uint32_t id,
                               torus_routing_strategy routing_strategy);
 
@@ -32,12 +35,10 @@ public:
 
 private:
     // TODO: will we be needing the _id property? Coords should do the job.
-    uint32_t _id;
-    string _name;
+    // On the other hand, we might need a callback_pipe to simulate switch latency
 
+    TwoDimensionalTorusTopology* _torus;
     torus_routing_strategy _routing_strategy;
-
-    static uint32_t id;
 };
 
 #endif  //! TWO_DIMENSIONAL_TORUS_SWITCH
