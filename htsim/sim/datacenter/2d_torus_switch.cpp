@@ -2,13 +2,18 @@
 
 #include "2d_torus_switch.h"
 #include <cstddef>
+#include <cstdint>
 #include <vector>
 #include "2d_torus_topology.h"
+#include "config.h"
 #include "eth_pause_packet.h"
 #include "network.h"
+#include "queue.h"
 #include "queue_lossless.h"
 #include "route.h"
 #include "switch.h"
+
+#define VC2 2
 
 TwoDimensionalTorusSwitch::TwoDimensionalTorusSwitch(EventList* eventlist,
                                                      TwoDimensionalTorusTopology* torus,
@@ -62,7 +67,7 @@ Route* TwoDimensionalTorusSwitch::getNextHop(Packet& pkt) {
         // The packet is allowed to enter a star channel on dimension Y only after it has finished
         // correcting its X dimension. When entering a star channel, it must follow DOR rules and
         // use VC0 if it hasn't wrapped around yet, otherwise VC1.
-        //
+
         // NOTE: in order to determine which VC to use (so whether a packet has wrapped around a
         // given dimension or not), we establish a convention where if there are two minimal paths
         // on the X-dimension, we default to the westward one, and similarly default to the
@@ -70,23 +75,149 @@ Route* TwoDimensionalTorusSwitch::getNextHop(Packet& pkt) {
 
         // Host coords format: [switch_y, switch_x, internal_host_number]
         vector<uint32_t> src_coords = _torus->get_coords_of_host[pkt.src()];
-        vector<uint32_t> dst_coords = _torus->get_coords_of_host[pkt.dst()];
+        vector<uint32_t> dest_coords = _torus->get_coords_of_host[pkt.dst()];
         // Switch coords: [switch_y, switch_x]
         vector<uint32_t> pkt_coords = _torus->get_coords_of_switch[_id];
 
-        // We need to determine the next hop:
-        // 1. Default to DOR:
-        //    a. Determine if we need to and can travel across X-dimension, and if so, if we've
-        //    already wrapped around:
-        //        i. If we need to and can, set next_hop accordingly.
-        //        ii. If we need to but can't, jump to point 2.
-        //    b. If here, then we don't need to travel acros X; see if we've wrapped around Y
-        //    already:
-        //        i. If we can travel across Y, do so.
-        //        ii. Else, go to point 2.
-        // 2. Use VC2:
-        //    a.
+        uint32_t n = _torus->get_n();
+        uint32_t m = _torus->get_m();
+        uint32_t VC = 0;
+
+        // First, construct route out of host and into switch if still at src
+        if (pkt_coords[1] == src_coords[1] && pkt_coords[0] == src_coords[0]) {
+            next_hop->push_back(
+                _torus->host_to_switch_queues[src_coords[0]][src_coords[1]][src_coords[2]]);
+            next_hop->push_back(
+                _torus->host_to_switch_pipes[src_coords[0]][src_coords[1]][src_coords[2]]);
+            next_hop->push_back(_torus->switches[src_coords[0]][src_coords[1]]);
+        }
+
+        // Check if X dimension needs to be corrected
+        if (pkt_coords[1] != dest_coords[1]) {
+            // Determine next minimal direction
+
+            // Eastward case: (x < dest_x && wrapping around to the west is slower) ||
+            // (x > dest_x && wrapping around to the east is faster)
+            if (((pkt_coords[1] < dest_coords[1]) && ((dest_coords[1] - pkt_coords[1]) * 2 < m)) ||
+                ((pkt_coords[1] > dest_coords[1]) && ((pkt_coords[1] - dest_coords[1]) * 2 > m))) {
+                // Determine which VC is being used by determining whether a wrap-around has
+                // happened.
+                // Wrapped around if (src_x > dest_x && x < dest_x)
+                if (src_coords[1] > dest_coords[1] && pkt_coords[1] < dest_coords[1]) {
+                    VC = 1;
+                }
+                Queue* east_q = _torus->east_egress_queues[pkt_coords[0]][pkt_coords[1]][VC];
+
+                // Is east route congested?
+                double fullness_ratio = ((double)east_q->queuesize()) / ((double)east_q->maxsize());
+                // The fuller the queue is, the higher the probability to use VC2
+                if ((fullness_ratio > 0.5) && (drand() < fullness_ratio)) {
+                    // if (east_q->queuesize() == east_q->maxsize()) {
+                    // 2.a. Use VC2
+                    // Check if eastward VC2 is congested. If it is, attempt to go north or south
+                    Queue* east_q_vc2 =
+                        _torus->east_egress_queues[pkt_coords[0]][pkt_coords[1]][VC2];
+                    // if (east_q_vc2->queuesize() < east_q_vc2->maxsize()) {
+                    next_hop->push_back(east_q_vc2);
+                    next_hop->push_back(_torus->eastbound_pipes[pkt_coords[0]][pkt_coords[1]][VC2]);
+                    next_hop->push_back(east_q_vc2->getRemoteEndpoint());
+                    // } else {
+                    // TODO:Find if going north or south is a minimal path
+
+                } else {
+                    next_hop->push_back(east_q);
+                    next_hop->push_back(_torus->eastbound_pipes[pkt_coords[0]][pkt_coords[1]][VC]);
+                    next_hop->push_back(east_q->getRemoteEndpoint());
+                }
+            } else {
+                // Westward case:
+                // Check if pkt wrapped around
+                if ((src_coords[1] < dest_coords[1]) && (pkt_coords[1] > dest_coords[1])) {
+                    VC = 1;
+                }
+
+                // Determine whether west is congested
+                Queue* west_q = _torus->west_egress_queues[pkt_coords[0]][pkt_coords[1]][VC];
+                double fullness_ratio = ((double)west_q->queuesize()) / ((double)west_q->maxsize());
+                if ((fullness_ratio > 0.5) && (drand() < fullness_ratio)) {
+                    next_hop->push_back(
+                        _torus->west_egress_queues[pkt_coords[0]][pkt_coords[1]][VC2]);
+                    next_hop->push_back(_torus->westbound_pipes[pkt_coords[0]][pkt_coords[1]][VC2]);
+                    next_hop->push_back(
+                        _torus->west_egress_queues[pkt_coords[0]][pkt_coords[1]][VC2]
+                            ->getRemoteEndpoint());
+                } else {
+                    next_hop->push_back(west_q);
+                    next_hop->push_back(_torus->westbound_pipes[pkt_coords[0]][pkt_coords[1]][VC]);
+                    next_hop->push_back(west_q->getRemoteEndpoint());
+                }
+            }
+            return next_hop;
+        } else if (pkt_coords[0] != dest_coords[0]) {
+            // Check if Y dimension needs correcting
+            // Determine next minimal direction
+
+            // Southward case: (y < y' && wrap-around to the north is slower) || (y > y' &&
+            // wrap-around to the south is faster)
+            if (((pkt_coords[0] < dest_coords[0]) && ((dest_coords[0] - pkt_coords[0]) * 2 < n)) ||
+                ((pkt_coords[0] > dest_coords[0]) && ((pkt_coords[0] - dest_coords[0]) * 2 > n))) {
+                // Check if pkt wrapped around
+                if ((src_coords[0] > dest_coords[0]) && (pkt_coords[0] < dest_coords[0])) {
+                    VC = 1;
+                }
+                // Check queue congestion
+                Queue* south_q = _torus->south_egress_queues[pkt_coords[0]][pkt_coords[1]][VC];
+
+                double fullness_ratio =
+                    ((double)south_q->queuesize()) / ((double)south_q->maxsize());
+                if ((fullness_ratio > 0.5) && (drand() < fullness_ratio)) {
+                    next_hop->push_back(
+                        _torus->south_egress_queues[pkt_coords[0]][pkt_coords[1]][VC2]);
+                    next_hop->push_back(
+                        _torus->southbound_pipes[pkt_coords[0]][pkt_coords[1]][VC2]);
+                    next_hop->push_back(
+                        _torus->south_egress_queues[pkt_coords[0]][pkt_coords[1]][VC2]
+                            ->getRemoteEndpoint());
+                } else {
+                    next_hop->push_back(south_q);
+                    next_hop->push_back(_torus->southbound_pipes[pkt_coords[0]][pkt_coords[1]][VC]);
+                    next_hop->push_back(south_q->getRemoteEndpoint());
+                }
+            } else {
+                // Northward case:
+                // Check for wrap-around
+                if ((src_coords[0] < dest_coords[0]) && (pkt_coords[0] > dest_coords[0])) {
+                    VC = 1;
+                }
+                // Check queue congestion
+                Queue* north_q = _torus->north_egress_queues[pkt_coords[0]][pkt_coords[1]][VC];
+                double fullness_ratio =
+                    ((double)north_q->queuesize()) / ((double)north_q->maxsize());
+                if ((fullness_ratio > 0.5) && (drand() < fullness_ratio)) {
+                    next_hop->push_back(
+                        _torus->north_egress_queues[pkt_coords[0]][pkt_coords[1]][VC2]);
+                    next_hop->push_back(
+                        _torus->northbound_pipes[pkt_coords[0]][pkt_coords[1]][VC2]);
+                    next_hop->push_back(
+                        _torus->north_egress_queues[pkt_coords[0]][pkt_coords[1]][VC2]
+                            ->getRemoteEndpoint());
+                } else {
+                    next_hop->push_back(north_q);
+                    next_hop->push_back(_torus->northbound_pipes[pkt_coords[0]][pkt_coords[1]][VC]);
+                    next_hop->push_back(north_q->getRemoteEndpoint());
+                }
+            }
+            return next_hop;
+        } else {
+            // If at destination, add switch to host routing
+            next_hop->push_back(
+                _torus->switch_to_host_queues[dest_coords[0]][dest_coords[1]][dest_coords[2]]);
+            next_hop->push_back(
+                _torus->switch_to_host_pipes[dest_coords[0]][dest_coords[1]][dest_coords[2]]);
+        }
     }
+    // TODO: Check if we need to add the host-switch routing here, as that doesn't seem to be
+    // the case in fat tree switch
 
     return next_hop;
 }

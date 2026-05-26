@@ -23,13 +23,11 @@ class TwoDimensionalTorusSwitch : public Switch {
 public:
     EventList* _eventList;
 
-    // TODO: Don't forget to call Switch constructor with appropriate parameters if necessary
     TwoDimensionalTorusSwitch(EventList* eventlist,
                               TwoDimensionalTorusTopology* torus,
                               uint32_t id,
                               torus_routing_strategy routing_strategy);
 
-    // TODO: introduce switch latency
     virtual void receivePacket(Packet& pkt) override;
     virtual Route* getNextHop(Packet& pkt) override;
 

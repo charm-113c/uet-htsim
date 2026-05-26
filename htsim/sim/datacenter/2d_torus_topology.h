@@ -67,33 +67,33 @@ public:
     QueueLoggerFactory* _q_logger_factory;
 
     //! n*m 2D vector of switches
-    vector<vector<Switch*>> _switches;
+    vector<vector<Switch*>> switches;
     //! Each switch is assigned one or more servers/hosts
     //! So we model those hosts' egress queues and pipes
     //! 3D vector: first 2D correspond to switch, 3rd is the associated hosts
-    vector<vector<vector<Queue*>>> _host_to_switch_queues;
-    vector<vector<vector<Queue*>>> _switch_to_host_queues;
-    vector<vector<vector<Pipe*>>> _host_to_switch_pipes;
-    vector<vector<vector<Pipe*>>> _switch_to_host_pipes;
+    vector<vector<vector<Queue*>>> host_to_switch_queues;
+    vector<vector<vector<Queue*>>> switch_to_host_queues;
+    vector<vector<vector<Pipe*>>> host_to_switch_pipes;
+    vector<vector<vector<Pipe*>>> switch_to_host_pipes;
 
     //! Switch-to-switch network
     //! 3D vector for Pipe: first 2D correspond to associated switch, 3rd dimension represents the
     //! virtual channels
-    vector<vector<vector<Pipe*>>> _northbound_pipes;
-    vector<vector<vector<Pipe*>>> _eastbound_pipes;
-    vector<vector<vector<Pipe*>>> _southbound_pipes;
-    vector<vector<vector<Pipe*>>> _westbound_pipes;
+    vector<vector<vector<Pipe*>>> northbound_pipes;
+    vector<vector<vector<Pipe*>>> eastbound_pipes;
+    vector<vector<vector<Pipe*>>> southbound_pipes;
+    vector<vector<vector<Pipe*>>> westbound_pipes;
     //! Each pipe is preceded by its own egress queue
-    vector<vector<vector<Queue*>>> _north_egress_queues;
-    vector<vector<vector<Queue*>>> _east_egress_queues;
-    vector<vector<vector<Queue*>>> _south_egress_queues;
-    vector<vector<vector<Queue*>>> _west_egress_queues;
+    vector<vector<vector<Queue*>>> north_egress_queues;
+    vector<vector<vector<Queue*>>> east_egress_queues;
+    vector<vector<vector<Queue*>>> south_egress_queues;
+    vector<vector<vector<Queue*>>> west_egress_queues;
     //! To each egress queue we associate the ingress queue opposite to it (although ingress queues
     //! are only used for lossless input queues)
-    vector<vector<vector<Queue*>>> _north_ingress_queues;
-    vector<vector<vector<Queue*>>> _east_ingress_queues;
-    vector<vector<vector<Queue*>>> _south_ingress_queues;
-    vector<vector<vector<Queue*>>> _west_ingress_queues;
+    vector<vector<vector<Queue*>>> north_ingress_queues;
+    vector<vector<vector<Queue*>>> east_ingress_queues;
+    vector<vector<vector<Queue*>>> south_ingress_queues;
+    vector<vector<vector<Queue*>>> west_ingress_queues;
 
     //! Map switch ids to their network coordinate
     unordered_map<uint32_t, vector<uint32_t>> get_coords_of_switch;
@@ -131,6 +131,9 @@ public:
 
     virtual vector<const Route*>* get_bidir_paths(uint32_t src, uint32_t dest, bool reverse);
     virtual vector<uint32_t>* get_neighbours(uint32_t src);
+
+    inline uint32_t get_n() const { return _n; }
+    inline uint32_t get_m() const { return _m; }
 
     virtual void add_switch_loggers(Logfile& log, simtime_picosec sample_period);
     // NOTE: while Switches and Queues can be logged (see constructor for queues), the same isn't
