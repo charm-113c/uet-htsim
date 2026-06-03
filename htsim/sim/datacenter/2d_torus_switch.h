@@ -1,6 +1,6 @@
 // -*- c-basic-offset: 4; indent-tabs-mode: nil -*-
-#ifndef TWO_DIMENSIONAL_TORUS_SWITCH
-#define TWO_DIMENSIONAL_TORUS_SWITCH
+#ifndef _TWO_DIMENSIONAL_TORUS_SWITCH_H
+#define _TWO_DIMENSIONAL_TORUS_SWITCH_H
 
 #include <cstdint>
 #include "eventlist.h"
@@ -26,17 +26,19 @@ public:
     TwoDimensionalTorusSwitch(EventList* eventlist,
                               TwoDimensionalTorusTopology* torus,
                               uint32_t id,
+                              string name,
                               torus_routing_strategy routing_strategy);
 
     virtual void receivePacket(Packet& pkt) override;
     virtual Route* getNextHop(Packet& pkt) override;
 
+    static void set_strategy(torus_routing_strategy s) { _routing_strategy = s; }
+    static torus_routing_strategy _routing_strategy;
+
 private:
-    // TODO: will we be needing the _id property? Coords should do the job.
-    // On the other hand, we might need a callback_pipe to simulate switch latency
+    // TODO: need a callback_pipe to simulate switch latency
 
     TwoDimensionalTorusTopology* _torus;
-    torus_routing_strategy _routing_strategy;
 };
 
-#endif  //! TWO_DIMENSIONAL_TORUS_SWITCH
+#endif  //! _TWO_DIMENSIONAL_TORUS_SWITCH_H

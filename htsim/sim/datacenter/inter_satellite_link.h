@@ -3,7 +3,9 @@
 #define INTERSATELLITE_LINK
 
 #include <cstdint>
+#include <map>
 #include "config.h"
+#include "network.h"
 #include "pipe.h"
 
 /**
@@ -38,6 +40,7 @@ public:
                        uint32_t altitude);
 
     void receivePacket(Packet& pkt) override;  // inherited from PacketSink
+    void doNextEvent() override;
 
 private:
     uint32_t _constellation_n;
@@ -47,7 +50,7 @@ private:
     uint32_t _orbital_inclination_in_deg;
     uint32_t _altitude_m;
 
-    simtime_picosec _latency;
+    multimap<simtime_picosec, Packet*> _inflight_map;
 
     simtime_picosec _compute_intraplane_latency_ps();
     simtime_picosec _compute_interplane_latency_ps(simtime_picosec current_time);

@@ -1,11 +1,13 @@
 // -*- c-basic-offset: 4; indent-tabs-mode: nil -*-
 
 #include "inter_satellite_link.h"
+#include <cassert>
 #include <cmath>
 #include <cstdint>
 #include <sstream>
 #include "config.h"
 #include "eventlist.h"
+#include "loggertypes.h"
 #include "network.h"
 #include "pipe.h"
 
@@ -35,8 +37,10 @@ InterSatelliteLink::InterSatelliteLink(uint32_t constellation_n,
     _orbital_inclination_in_deg = orbital_inclination;
     _altitude_m = altitude;
 
+    simtime_picosec latency;
+
     if (_isl_type == INTRAPLANE) {
-        _latency = _compute_intraplane_latency_ps();
+        latency = _compute_intraplane_latency_ps();
     } else {
         // Latency is variable, so we set average as latency
         // Use same formula as in TwoDimensionalTorusTopology
@@ -46,17 +50,20 @@ InterSatelliteLink::InterSatelliteLink(uint32_t constellation_n,
 
         double avg_dist = (2 / PI) * (_altitude_m + R_EARTH_M) * factor1 * factor2;
         double latency_s = avg_dist / C_MPS;
-        _latency = timeFromSec(latency_s);
+        latency = timeFromSec(latency_s);
     }
 
     stringstream ss;
-    ss << "InterSatelliteLink(" << timeAsUs(_latency) << "us";
+    ss << "InterSatelliteLink(" << timeAsUs(latency) << "us";
     _nodename = ss.str();
 }
 
 /*
- * This inherited method works exactly as it does in Pipe, the only modification being that delay is
- * computed according to the ISL_Type.
+ * Pipe::receivePacket() originally uses _inflight_v, however it's designed with fixed delay in mind
+ * and uses FIFO, which means it doesn't schedule packets according to which should arrive to its
+ * destination first. So instead, we use a multimap like eventlist, which makes ordering easier.
+ * Furthermore, if the latest packet to arrive should be delivered earlier than the packet that is
+ * currently scheduled, we cancel the latter to put the newer packet in its place.
  */
 void InterSatelliteLink::receivePacket(Packet& pkt) {
     simtime_picosec delay;
@@ -65,33 +72,50 @@ void InterSatelliteLink::receivePacket(Packet& pkt) {
     } else {
         delay = _compute_interplane_latency_ps(eventlist().now());
     }
+    simtime_picosec delivery_time = eventlist().now() + delay;
 
-    if (_count == 0) {
-        /* no packets currently inflight; need to notify the eventlist
-           we've an event pending */
-        eventlist().sourceIsPendingRel(*this, delay);
-    }
+    bool was_empty = _inflight_map.empty();
+    _inflight_map.insert({delivery_time, &pkt});
 
-    _count++;
-    if (_count == _size) {
-        _inflight_v.resize(_size * 2);
-        if (_next_insert < _next_pop) {
-            //   456789*123
-            // NI *, NP 1
-            for (int i = 0; i < _next_insert; i++) {
-                // move 4-9 into new space
-                _inflight_v.at(_size + i) = _inflight_v.at(i);
-            }
-            _next_insert += _size;
-        } else {
-            // 123456789*
-            // nothing to do
+    if (was_empty) {
+        eventlist().sourceIsPending(*this, delivery_time);
+    } else {
+        // Check if new packet has earlier delivery_time than current earliest scheduled packet
+        auto earliest_sched = _inflight_map.begin()->first;
+        if (delivery_time < earliest_sched) {
+            // If so, reschedule doNextEvent() call to send next packet earlier
+            eventlist().reschedulePendingSource(*this, delivery_time);
         }
-        _size += _size;
     }
-    _inflight_v[_next_insert].time = eventlist().now() + delay;
-    _inflight_v[_next_insert].pkt = &pkt;
-    _next_insert = (_next_insert + 1) % _size;
+}
+
+/*
+ * Override doNextEvent to use custom _inflight_map instead of _inflight_v.
+ * This method is the one called by the eventlist, and this is where queued packets are sent
+ * according to their scheduled time.
+ */
+void InterSatelliteLink::doNextEvent() {
+    if (_inflight_map.empty()) {
+        return;
+    }
+    auto it_earliest = _inflight_map.begin();
+    Packet* earliest_pkt = it_earliest->second;
+
+    earliest_pkt->flow().logTraffic(*earliest_pkt, *this, TrafficLogger::PKT_DEPART);
+    earliest_pkt->sendOn();
+
+    // Delete sent packet from map
+    _inflight_map.erase(it_earliest);
+
+    // Schedule next packet if there is one
+    if (!_inflight_map.empty()) {
+        // Schedule next event
+        auto earliest_sched = _inflight_map.begin()->first;
+        // Sanity check, but should never be false
+        assert(earliest_sched >= eventlist().now());
+
+        eventlist().sourceIsPending(*this, earliest_sched);
+    }
 }
 
 /*
@@ -101,6 +125,9 @@ void InterSatelliteLink::receivePacket(Packet& pkt) {
  * a perfectly spherical Earth. It also assumes inter-satellite links use lasers which travel at the
  * speed of light in a vaccum.
  * Leveraging this, it returns the intraplane latency between two neighbouring satellites.
+ *
+ * The formula used for distance can be found in the paper "QoS-Aware Resource Placement For LEO
+ * Satellite Edge Computing" by T. Pfandzelter and D. Bermbach.
  */
 simtime_picosec InterSatelliteLink::_compute_intraplane_latency_ps() {
     // Distance formula used:

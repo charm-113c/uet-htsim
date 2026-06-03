@@ -1,10 +1,13 @@
 // -*- c-basic-offset: 4; indent-tabs-mode: nil -*-
 
 #include "2d_torus_topology.h"
+#include <cassert>
 #include <cmath>
 #include <cstdint>
+#include <fstream>
 #include <iostream>
 #include <stdexcept>
+#include <string>
 #include <vector>
 #include "2d_torus_switch.h"
 #include "compositequeue.h"
@@ -38,20 +41,22 @@
 // Speed of light in mps
 #define C_MPS 299792458
 
+// Use tokenize from connection matrix
+extern void tokenize(std::string const& str, const char delim, std::vector<std::string>& out);
+
 //! Minimal constructor used to set default parameters
-TwoDimensionalTorusTopology::TwoDimensionalTorusTopology(Logfile* logfile,
-                                                         QueueLoggerFactory* q_log_factory,
+TwoDimensionalTorusTopology::TwoDimensionalTorusTopology(QueueLoggerFactory* q_log_factory,
                                                          uint32_t n,
                                                          uint32_t m,
                                                          bool is_constellation)
     : _eventlist(&EventList::getTheEventList()),
-      _logfile(logfile),
       _q_logger_factory(q_log_factory),
       _n(n),
       _m(m),
       _hosts_per_switch(0),
       _n_virtual_channels(0),
       _switch_queue_type(UNDEFINED),
+      _host_queue_type(UNDEFINED),
       _queue_size_b(0),
       _composite_q_cfg(),
       _linkspeed_bps(0),
@@ -63,8 +68,7 @@ TwoDimensionalTorusTopology::TwoDimensionalTorusTopology(Logfile* logfile,
       _inclination_in_deg(0) {};
 
 //! Full constructor
-TwoDimensionalTorusTopology::TwoDimensionalTorusTopology(Logfile* logfile,
-                                                         QueueLoggerFactory* q_log_factory,
+TwoDimensionalTorusTopology::TwoDimensionalTorusTopology(QueueLoggerFactory* q_log_factory,
                                                          uint32_t n,
                                                          uint32_t m,
                                                          uint32_t hosts_per_switch,
@@ -82,7 +86,7 @@ TwoDimensionalTorusTopology::TwoDimensionalTorusTopology(Logfile* logfile,
                                                          simtime_picosec host_switch_latency,
                                                          uint32_t altitude,
                                                          float_t inclination)
-    : TwoDimensionalTorusTopology(logfile, q_log_factory, n, m, is_constellation) {
+    : TwoDimensionalTorusTopology(q_log_factory, n, m, is_constellation) {
     // Set parameters
     set_hosts_per_switch(hosts_per_switch);
     set_routing_strategy(routing_strategy);
@@ -107,6 +111,8 @@ TwoDimensionalTorusTopology::TwoDimensionalTorusTopology(Logfile* logfile,
     switch_to_host_queues.resize(_n, vector<vector<Queue*>>(_m, vector<Queue*>(_hosts_per_switch)));
     host_to_switch_pipes.resize(_n, vector<vector<Pipe*>>(_m, vector<Pipe*>(_hosts_per_switch)));
     switch_to_host_pipes.resize(_n, vector<vector<Pipe*>>(_m, vector<Pipe*>(_hosts_per_switch)));
+    switch_internal_ingress_queue.resize(
+        _n, vector<vector<Queue*>>(_m, vector<Queue*>(_hosts_per_switch)));
 
     // Switch-switch networking
     north_egress_queues.resize(_n, vector<vector<Queue*>>(_m, vector<Queue*>(_n_virtual_channels)));
@@ -132,10 +138,9 @@ TwoDimensionalTorusTopology::TwoDimensionalTorusTopology(Logfile* logfile,
         for (uint32_t j = 0; j < _m; j++) {
             // Save id mapping
             get_coords_of_switch[id] = {i, j};
-
+            string name = "Switch_(" + ntoa(j) + ", " + ntoa(i) + ")";
             switches[i][j] =
-                new TwoDimensionalTorusSwitch(_eventlist, this, id++, _routing_strategy);
-            switches[i][j]->setName("Switch_(" + ntoa(i) + ", " + ntoa(j) + ")");
+                new TwoDimensionalTorusSwitch(_eventlist, this, id++, name, _routing_strategy);
         }
     }
 
@@ -157,10 +162,10 @@ TwoDimensionalTorusTopology::TwoDimensionalTorusTopology(Logfile* logfile,
                 // Create Pipes
                 host_to_switch_pipes[i][j][host] = new Pipe(_host_switch_latency, *_eventlist);
                 switch_to_host_pipes[i][j][host] = new Pipe(_host_switch_latency, *_eventlist);
-                host_to_switch_pipes[i][j][host]->setName("Pipe_Host" + ntoa(host) + "->Switch(" +
-                                                          ntoa(j) + ", " + ntoa(i) + ")");
-                switch_to_host_pipes[i][j][host]->setName("Pipe_Switch(" + ntoa(j) + ", " +
-                                                          ntoa(i) + ")->Host" + ntoa(host));
+                host_to_switch_pipes[i][j][host]->forceName(
+                    "Pipe_host(" + ntoa(host) + ")->switch(" + ntoa(j) + ", " + ntoa(i) + ")");
+                switch_to_host_pipes[i][j][host]->forceName(
+                    "Pipe_switch(" + ntoa(j) + ", " + ntoa(i) + ")->host(" + ntoa(host) + ")");
 
                 // Create queues
                 hst_swi_q_logger =
@@ -171,7 +176,26 @@ TwoDimensionalTorusTopology::TwoDimensionalTorusTopology(Logfile* logfile,
                 host_to_switch_queues[i][j][host] =
                     alloc_host_queue(hst_swi_q_logger, _linkspeed_bps);
                 switch_to_host_queues[i][j][host] =
-                    alloc_queue(swi_hst_q_logger, _linkspeed_bps, _queue_size_b);
+                    alloc_queue(swi_hst_q_logger, _linkspeed_bps, _queue_size_b, switches[i][j]);
+
+                assert(switches[i][j]);
+                // Create switches' ingress queues dedicated to hosts
+                if (switch_queue_type == LOSSLESS_INPUT ||
+                    switch_queue_type == LOSSLESS_INPUT_ECN) {
+                    switch_internal_ingress_queue[i][j][host] =
+                        new LosslessInputQueue(*_eventlist, host_to_switch_queues[i][j][host],
+                                               switches[i][j], host_switch_latency);
+                } else {
+                    host_to_switch_queues[i][j][host]->setRemoteEndpoint(switches[i][j]);
+                }
+                host_to_switch_queues[i][j][host]->setName(
+                    "_Queue_host(" + ntoa(host) + ")->switch(" + ntoa(j) + ", " + ntoa(i) + ")");
+                switch_to_host_queues[i][j][host]->setName("_Queue_switch(" + ntoa(j) + ", " +
+                                                           ntoa(i) + ")->host(" + ntoa(host) + ")");
+
+                // LosslessQueue will call addPort on switch upon creation
+                if (switch_queue_type != LOSSLESS)
+                    switches[i][j]->addPort(switch_to_host_queues[i][j][host]);
             }
 
             // Switch-switch networking
@@ -197,14 +221,14 @@ TwoDimensionalTorusTopology::TwoDimensionalTorusTopology(Logfile* logfile,
                     westbound_pipes[i][j][vc] = new Pipe(_latency, *_eventlist);
                 }
                 // Set names
-                northbound_pipes[i][j][vc]->setName("NorthboundPipe_(" + ntoa(j) + ", " + ntoa(i) +
-                                                    ")");
-                eastbound_pipes[i][j][vc]->setName("EastboundPipe_(" + ntoa(j) + ", " + ntoa(i) +
-                                                   ")");
-                southbound_pipes[i][j][vc]->setName("SouthboundPipe_(" + ntoa(j) + ", " + ntoa(i) +
-                                                    ")");
-                westbound_pipes[i][j][vc]->setName("WestboundPipe_(" + ntoa(j) + ", " + ntoa(i) +
-                                                   ")");
+                northbound_pipes[i][j][vc]->forceName("NorthboundPipe_(" + ntoa(j) + ", " +
+                                                      ntoa(i) + ")");
+                eastbound_pipes[i][j][vc]->forceName("EastboundPipe_(" + ntoa(j) + ", " + ntoa(i) +
+                                                     ")");
+                southbound_pipes[i][j][vc]->forceName("SouthboundPipe_(" + ntoa(j) + ", " +
+                                                      ntoa(i) + ")");
+                westbound_pipes[i][j][vc]->forceName("WestboundPipe_(" + ntoa(j) + ", " + ntoa(i) +
+                                                     ")");
                 // --------------------
 
                 // --- Create Queues ---
@@ -225,31 +249,33 @@ TwoDimensionalTorusTopology::TwoDimensionalTorusTopology(Logfile* logfile,
                 // if such queue types are used. Otherwise, ingress queues are left as nullptr.
                 north_egress_queues[i][j][vc] =
                     alloc_queue(n_queue_logger, _linkspeed_bps / _n_virtual_channels,
-                                _queue_size_b / _n_virtual_channels);
+                                _queue_size_b / _n_virtual_channels, switches[i][j]);
                 east_egress_queues[i][j][vc] =
                     alloc_queue(e_queue_logger, _linkspeed_bps / _n_virtual_channels,
-                                _queue_size_b / _n_virtual_channels);
+                                _queue_size_b / _n_virtual_channels, switches[i][j]);
                 south_egress_queues[i][j][vc] =
                     alloc_queue(s_queue_logger, _linkspeed_bps / _n_virtual_channels,
-                                _queue_size_b / _n_virtual_channels);
+                                _queue_size_b / _n_virtual_channels, switches[i][j]);
                 west_egress_queues[i][j][vc] =
                     alloc_queue(w_queue_logger, _linkspeed_bps / _n_virtual_channels,
-                                _queue_size_b / _n_virtual_channels);
+                                _queue_size_b / _n_virtual_channels, switches[i][j]);
 
-                north_egress_queues[i][j][vc]->setName("NorthEgressQueue_(" + ntoa(j) + ", " +
+                north_egress_queues[i][j][vc]->setName("_NorthEgressQueue_(" + ntoa(j) + ", " +
                                                        ntoa(i) + ")");
-                east_egress_queues[i][j][vc]->setName("EastEgressQueue_(" + ntoa(j) + ", " +
+                east_egress_queues[i][j][vc]->setName("_EastEgressQueue_(" + ntoa(j) + ", " +
                                                       ntoa(i) + ")");
-                south_egress_queues[i][j][vc]->setName("SouthEgressQueue_(" + ntoa(j) + ", " +
+                south_egress_queues[i][j][vc]->setName("_SouthEgressQueue_(" + ntoa(j) + ", " +
                                                        ntoa(i) + ")");
-                west_egress_queues[i][j][vc]->setName("WestEgressQueue_(" + ntoa(j) + ", " +
+                west_egress_queues[i][j][vc]->setName("_WestEgressQueue_(" + ntoa(j) + ", " +
                                                       ntoa(i) + ")");
                 // Connect switch to these queues
-                switches[i][j]->addPort(north_egress_queues[i][j][vc]);
-                switches[i][j]->addPort(east_egress_queues[i][j][vc]);
-                switches[i][j]->addPort(south_egress_queues[i][j][vc]);
-                switches[i][j]->addPort(west_egress_queues[i][j][vc]);
-
+                if (switch_queue_type != LOSSLESS) {
+                    // LosslessQueue will call addPort on switch upon creation
+                    switches[i][j]->addPort(north_egress_queues[i][j][vc]);
+                    switches[i][j]->addPort(east_egress_queues[i][j][vc]);
+                    switches[i][j]->addPort(south_egress_queues[i][j][vc]);
+                    switches[i][j]->addPort(west_egress_queues[i][j][vc]);
+                }
                 // Assign remote endpoint to egress queues:
 
                 // For instance, current switch's north egress queue will be paired with south
@@ -277,22 +303,22 @@ TwoDimensionalTorusTopology::TwoDimensionalTorusTopology(Logfile* logfile,
                     // _egress_queues->getRemoteEndpoint()
                     south_ingress_queues[n_i][n_j][vc] = new LosslessInputQueue(
                         *_eventlist, north_egress_queues[i][j][vc], switches[n_i][n_j], _latency);
-                    south_ingress_queues[n_i][n_j][vc]->setName("SouthIngressQueue_(" + ntoa(n_i) +
+                    south_ingress_queues[n_i][n_j][vc]->setName("_SouthIngressQueue_(" + ntoa(n_i) +
                                                                 ", " + ntoa(n_j) + ")");
 
                     west_ingress_queues[e_i][e_j][vc] = new LosslessInputQueue(
                         *_eventlist, east_egress_queues[i][j][vc], switches[e_i][e_j], _latency);
-                    west_ingress_queues[e_i][e_j][vc]->setName("WestIngressQueue_(" + ntoa(e_i) +
+                    west_ingress_queues[e_i][e_j][vc]->setName("_WestIngressQueue_(" + ntoa(e_i) +
                                                                ", " + ntoa(e_j) + ")");
 
                     north_ingress_queues[s_i][s_j][vc] = new LosslessInputQueue(
                         *_eventlist, south_egress_queues[i][j][vc], switches[s_i][s_j], _latency);
-                    north_ingress_queues[s_i][s_j][vc]->setName("NorthIngressQueue_(" + ntoa(s_i) +
+                    north_ingress_queues[s_i][s_j][vc]->setName("_NorthIngressQueue_(" + ntoa(s_i) +
                                                                 ", " + ntoa(s_j) + ")");
 
                     east_ingress_queues[w_i][w_j][vc] = new LosslessInputQueue(
                         *_eventlist, west_egress_queues[i][j][vc], switches[w_i][w_j], _latency);
-                    east_ingress_queues[w_i][w_j][vc]->setName("EastIngressQueue_(" + ntoa(w_i) +
+                    east_ingress_queues[w_i][w_j][vc]->setName("_EastIngressQueue_(" + ntoa(w_i) +
                                                                ", " + ntoa(w_j) + ")");
                 } else {
                     // It is still necessary to set the egress queues' endpoints as their opposite
@@ -310,9 +336,95 @@ TwoDimensionalTorusTopology::TwoDimensionalTorusTopology(Logfile* logfile,
             // NOTE: Pipes are "connected" upon route creation, see get_bidir_paths
         }
     }
+    // Initialise lossless queues' thresholds to send PAUSE and UNPAUSE frames
+    if (switch_queue_type == LOSSLESS) {
+        for (uint32_t i = 0; i < _n; i++) {
+            for (uint32_t j = 0; j < _m; j++) {
+                switches[i][j]->configureLossless();
+            }
+        }
+    }
 }
 
-// TODO: Create constructor that reads from config file
+/*
+ * Load config from file and return topology
+ */
+TwoDimensionalTorusTopology* TwoDimensionalTorusTopology::load(string filename,
+                                                               EventList& eventlist,
+                                                               QueueLoggerFactory* q_log_factory,
+                                                               queue_type switch_q_type,
+                                                               queue_type host_q_type) {
+    uint32_t n, m, host_p_switch, altitude_m;
+    uint16_t trim_size;
+    float_t inclination_deg;
+    mem_b q_size, ecn_high, ecn_low;
+    linkspeed_bps linkspeed_bps;
+    bool disable_trim, is_constellation;
+    simtime_picosec latency, host_switch_latency;
+    torus_routing_strategy routing_strategy;
+
+    string line;
+
+    ifstream file(filename);
+    cout << "Reading torus cfg from: " << filename << endl;
+    if (file.is_open()) {
+        TwoDimensionalTorusTopology* topo = nullptr;
+
+        while (getline(file, line)) {
+            vector<string> tokens;
+            tokenize(line, ' ', tokens);
+
+            if (tokens.size() == 0 || tokens[0][0] == '#')
+                continue;
+
+            if (tokens[0] == "n")
+                n = stoi(tokens[1]);
+            else if (tokens[0] == "m")
+                m = stoi(tokens[1]);
+            else if (tokens[0] == "host_per_switch")
+                host_p_switch = stoi(tokens[1]);
+            else if (tokens[0] == "altitude_m")
+                altitude_m = stoi(tokens[1]);
+            else if (tokens[0] == "trim_size_b")
+                trim_size = (mem_b)stoi(tokens[1]);
+            else if (tokens[0] == "inclination_deg")
+                inclination_deg = stof(tokens[1]);
+            else if (tokens[0] == "queue_size_b" || tokens[0] == "queue_size_from_npackets")
+                q_size = (tokens[0] == "queue_size_b") ? (mem_b)stoi(tokens[1])
+                                                       : memFromPkt(stoi(tokens[1]));
+            else if (tokens[0] == "ecn_high_b")
+                ecn_high = (mem_b)stoi(tokens[1]);
+            else if (tokens[0] == "ecn_low_b")
+                ecn_low = (mem_b)stoi(tokens[1]);
+            else if (tokens[0] == "linkspeed_Gbps")
+                linkspeed_bps = speedFromGbps(stoi(tokens[1]));
+            else if (tokens[0] == "disable_trim")
+                disable_trim = (tokens[1] == "true") ? true : false;
+            else if (tokens[0] == "is_constellation")
+                is_constellation = (tokens[1] == "true") ? true : false;
+            else if (tokens[0] == "latency_ns")
+                latency = timeFromNs(stoi(tokens[1]));
+            else if (tokens[0] == "host_switch_latency_ns")
+                host_switch_latency = timeFromNs(stoi(tokens[1]));
+            else if (tokens[0] == "routing_strategy")
+                routing_strategy =
+                    (tokens[1] == "dimension_order") ? DIMENSION_ORDER : MINIMAL_ADAPTIVE_ALG;
+        }
+
+        topo = new TwoDimensionalTorusTopology(
+            q_log_factory, n, m, host_p_switch, switch_q_type, host_q_type, q_size, linkspeed_bps,
+            disable_trim, trim_size, ecn_high, ecn_low, routing_strategy, is_constellation, latency,
+            host_switch_latency, altitude_m, inclination_deg);
+
+        cout << "Torus topology created" << endl;
+
+        file.close();
+        return topo;
+    } else {
+        cerr << "Failed to open 2D torus config file " << filename << endl;
+        exit(1);
+    }
+}
 
 template <class P>
 void delete_3d_vector(vector<vector<vector<P*>>>& vec3d) {
@@ -338,6 +450,7 @@ TwoDimensionalTorusTopology::~TwoDimensionalTorusTopology() {
     delete_3d_vector(host_to_switch_pipes);
     delete_3d_vector(switch_to_host_queues);
     delete_3d_vector(switch_to_host_pipes);
+    delete_3d_vector(switch_internal_ingress_queue);
 
     delete_3d_vector(north_egress_queues);
     delete_3d_vector(east_egress_queues);
@@ -462,7 +575,8 @@ Queue* TwoDimensionalTorusTopology::alloc_host_queue(QueueLogger* queue_logger,
 
 Queue* TwoDimensionalTorusTopology::alloc_queue(QueueLogger* queue_logger,
                                                 linkspeed_bps linkspeed_bps,
-                                                mem_b queue_size) {
+                                                mem_b queue_size,
+                                                Switch* sw) {
     switch (_switch_queue_type) {
         case RANDOM:
             // Simple queue that randomly decides whether to drop packet when above a given
@@ -478,13 +592,17 @@ Queue* TwoDimensionalTorusTopology::alloc_queue(QueueLogger* queue_logger,
             // Sets a threshold below max size, and when reached sends a pause frame back to sender
             // until ready to receive again. If it receives a pause frame, it waits until sender is
             // ready to receive again
-            return new LosslessQueue(linkspeed_bps, queue_size, *_eventlist, queue_logger, nullptr);
+            // NOTE: queue type uses thresholds which are fixed, but also too small for large packet
+            // flows (+500 000 pkts in flight), and which will cause LOSSLESS-ness to fail for torus
+            // Always prefer LOSSLESS_INPUT, where thresholds can be set statically/per run
+            return new LosslessQueue(linkspeed_bps, queue_size, *_eventlist, queue_logger, sw);
         case LOSSLESS_INPUT:
             // We need to pair this queue to a LosslessInputQueue we'll create, so actually return
             // LosslessOutputQueue. Only input queues can send pause frame, output queues must wait
             return new LosslessOutputQueue(linkspeed_bps, queue_size, *_eventlist, queue_logger);
         case LOSSLESS_INPUT_ECN:
             // Emulate (actually lossless) ECN by having virtually inexhaustible buffer size
+            // NOTE: Because of its queue size, it should be preferred for large simulations
             return new LosslessOutputQueue(linkspeed_bps, memFromPkt(10000), *_eventlist,
                                            queue_logger);
         case CTRL_PRIO:
@@ -537,9 +655,48 @@ vector<const Route*>* TwoDimensionalTorusTopology::get_bidir_paths(uint32_t src,
     route_src_dest_3 = nullptr;
     route_src_dest_4 = nullptr;
 
+    // cout << "--------------------------------------------------------------" << endl;
+    // cout << "Creating route between src=" << src << " and dest=" << dest << endl;
+
     // Coords are saved in [i, j, host_position] == [y-dimension, x-dimension, host_position]
     vector<uint32_t> pkt_coords = get_coords_of_host[src];
     vector<uint32_t> dest_coords = get_coords_of_host[dest];
+    // cout << "src_x=" << pkt_coords[1] << ", src_y=" << pkt_coords[0] << endl;
+    // cout << "dst_x=" << dest_coords[1] << ", dst_y=" << dest_coords[0] << endl;
+
+    // First, handle case where src and dest belong to the same switch
+    if (pkt_coords[0] == dest_coords[0] && pkt_coords[1] == dest_coords[1]) {
+        // Route up into switch
+        route_src_dest->push_back(
+            host_to_switch_queues[pkt_coords[0]][pkt_coords[1]][pkt_coords[2]]);
+        route_src_dest->push_back(
+            host_to_switch_pipes[pkt_coords[0]][pkt_coords[1]][pkt_coords[2]]);
+        route_src_dest->push_back(host_to_switch_queues[pkt_coords[0]][pkt_coords[1]][pkt_coords[2]]
+                                      ->getRemoteEndpoint());
+        // Route down from switch to dest host
+        route_src_dest->push_back(
+            switch_to_host_queues[dest_coords[0]][dest_coords[1]][dest_coords[2]]);
+        route_src_dest->push_back(
+            switch_to_host_pipes[dest_coords[0]][dest_coords[1]][dest_coords[2]]);
+
+        if (reverse) {
+            Route* route_dest_src = new Route();
+            route_dest_src->push_back(
+                host_to_switch_queues[dest_coords[0]][dest_coords[1]][dest_coords[2]]);
+            route_dest_src->push_back(
+                host_to_switch_pipes[dest_coords[0]][dest_coords[1]][dest_coords[2]]);
+            route_dest_src->push_back(
+                host_to_switch_queues[dest_coords[0]][dest_coords[1]][dest_coords[2]]
+                    ->getRemoteEndpoint());
+            route_dest_src->push_back(
+                switch_to_host_queues[pkt_coords[0]][pkt_coords[1]][pkt_coords[2]]);
+            route_dest_src->push_back(
+                switch_to_host_pipes[pkt_coords[0]][pkt_coords[1]][pkt_coords[2]]);
+
+            route_src_dest->set_reverse(route_dest_src);
+            route_dest_src->set_reverse(route_src_dest);
+        }
+    }
 
     // In dimension-ordered routing, we use two virtual channels per link.
     // Then, when routing a packet from (x,y) to (x', y'), we first route it over one dimension, in
@@ -563,6 +720,7 @@ vector<const Route*>* TwoDimensionalTorusTopology::get_bidir_paths(uint32_t src,
         if (((pkt_coords[1] < dest_coords[1]) && ((dest_coords[1] - pkt_coords[1]) * 2 < _m)) ||
             ((pkt_coords[1] > dest_coords[1]) && ((pkt_coords[1] - dest_coords[1]) * 2 > _m))) {
             // Create single eastward route
+            // cout << "Min path is eastward" << endl;
             _add_eastward_route_to(route_src_dest, pkt_coords, dest_coords, reverse);
         }
 
@@ -571,6 +729,7 @@ vector<const Route*>* TwoDimensionalTorusTopology::get_bidir_paths(uint32_t src,
         if (((pkt_coords[1] > dest_coords[1]) && ((pkt_coords[1] - dest_coords[1]) * 2 < _m)) ||
             ((pkt_coords[1] < dest_coords[1]) && ((dest_coords[1] - pkt_coords[1]) * 2 > _m))) {
             // Create single westward route
+            // cout << "Min path is westward" << endl;
             _add_westward_route_to(route_src_dest, pkt_coords, dest_coords, reverse);
         }
 
@@ -578,9 +737,14 @@ vector<const Route*>* TwoDimensionalTorusTopology::get_bidir_paths(uint32_t src,
         if ((pkt_coords[1] - dest_coords[1] == _m / 2) ||
             (dest_coords[1] - pkt_coords[1] == _m / 2)) {
             // Add both east and west routes
+            // cout << "East and west both valid min paths" << endl;
+            route_src_dest_2 = new Route();
             _add_x_routes_to(route_src_dest, route_src_dest_2, pkt_coords, dest_coords, reverse);
         }
     }
+
+    // If we got here, X dimension was corrected, so set
+    pkt_coords[1] = dest_coords[1];  // (the above loop doesn't update it)
 
     // Y-dimension routing
     if (pkt_coords[0] != dest_coords[0]) {
@@ -601,10 +765,12 @@ vector<const Route*>* TwoDimensionalTorusTopology::get_bidir_paths(uint32_t src,
         if (((pkt_coords[0] > dest_coords[0]) && ((pkt_coords[0] - dest_coords[0]) * 2 < _n)) ||
             ((pkt_coords[0] < dest_coords[0]) && ((dest_coords[0] - pkt_coords[0]) * 2 > _n))) {
             // 1. We start with a single route
+            // cout << "Min path is northward" << endl;
             _add_northward_route_to(route_src_dest, pkt_coords, dest_coords, reverse);
 
             // 2. We start with two possible routes
             if (route_src_dest_2 != nullptr) {
+                // cout << "Two min paths" << endl;
                 _add_northward_route_to(route_src_dest_2, pkt_coords, dest_coords, reverse);
             }
         }
@@ -613,9 +779,11 @@ vector<const Route*>* TwoDimensionalTorusTopology::get_bidir_paths(uint32_t src,
         // wrap-around to the south is faster)
         if (((pkt_coords[0] < dest_coords[0]) && ((dest_coords[0] - pkt_coords[0]) * 2 < _n)) ||
             ((pkt_coords[0] > dest_coords[0]) && ((pkt_coords[0] - dest_coords[0]) * 2 > _n))) {
+            // cout << "Min path is southward" << endl;
             // 1. Single route
             _add_southward_route_to(route_src_dest, pkt_coords, dest_coords, reverse);
             if (route_src_dest_2 != nullptr) {
+                // cout << "Two min paths" << endl;
                 // 2. Two routes
                 _add_southward_route_to(route_src_dest_2, pkt_coords, dest_coords, reverse);
             }
@@ -624,6 +792,7 @@ vector<const Route*>* TwoDimensionalTorusTopology::get_bidir_paths(uint32_t src,
         // 3. Two min routes: (|y->y'| == |y-y'| == _n/2), can only happen when n is even
         if ((pkt_coords[0] - dest_coords[0] == _n / 2) ||
             (dest_coords[0] - pkt_coords[0] == _n / 2)) {
+            // cout << "North and south both min paths" << endl;
             // 1. Single route: copy route_src_dest into route3, so as to create one variant that
             // goes north and another that goes south
             route_src_dest_3 = route_src_dest->clone();
@@ -638,6 +807,7 @@ vector<const Route*>* TwoDimensionalTorusTopology::get_bidir_paths(uint32_t src,
             _add_y_routes_to(route_src_dest, route_src_dest_3, pkt_coords, dest_coords, reverse);
 
             if (route_src_dest_2 != nullptr) {
+                // cout << "Four min paths" << endl;
                 // 2. Two routes: copy route_src_dest_2 into route_src_dest_4 and do the same as
                 // above
                 route_src_dest_4 = route_src_dest_2->clone();
@@ -658,8 +828,11 @@ vector<const Route*>* TwoDimensionalTorusTopology::get_bidir_paths(uint32_t src,
     }
     if (route_src_dest_3 != nullptr) {
         paths->push_back(route_src_dest_3);
-        paths->push_back(route_src_dest_4);
+        if (route_src_dest_4 != nullptr)
+            paths->push_back(route_src_dest_4);
     }
+
+    // cout << "Route created" << endl;
 
     return paths;
 }
@@ -679,41 +852,40 @@ void TwoDimensionalTorusTopology::_add_eastward_route_to(Route* route,
     bool has_wrapped_around = false;
     bool rev_has_wrapped_around = false;
 
+    // cout << "-----------------" << endl;
+    // cout << "Printing eastward path" << endl;
     Route* reverse_route = (reverse) ? new Route() : nullptr;
 
     // First push the host's egress queues into route to allow packets into switch.
     route->push_back(host_to_switch_queues[pkt_coords[0]][pkt_coords[1]][pkt_coords[2]]);
     route->push_back(host_to_switch_pipes[pkt_coords[0]][pkt_coords[1]][pkt_coords[2]]);
-    route->push_back(switches[pkt_coords[0]][pkt_coords[1]]);
+    route->push_back(
+        host_to_switch_queues[pkt_coords[0]][pkt_coords[1]][pkt_coords[2]]->getRemoteEndpoint());
+    // cout << "Host to switch route added" << endl;
+
     if (reverse) {
         reverse_route->push_back(host_to_switch_queues[reverse_pkt_coords[0]][reverse_pkt_coords[1]]
                                                       [reverse_pkt_coords[2]]);
         reverse_route->push_back(host_to_switch_pipes[reverse_pkt_coords[0]][reverse_pkt_coords[1]]
                                                      [reverse_pkt_coords[2]]);
-        reverse_route->push_back(switches[reverse_pkt_coords[0]][reverse_pkt_coords[1]]);
+        reverse_route->push_back(host_to_switch_queues[reverse_pkt_coords[0]][reverse_pkt_coords[1]]
+                                                      [reverse_pkt_coords[2]]
+                                                          ->getRemoteEndpoint());
+        // cout << "Reverse host to switch route added" << endl;
     }
 
     // Then move east
     while (pkt_coords[1] != dest_coords[1]) {
-        // Keep moving east, using wrap-around if necessary
-        if (!has_wrapped_around) {
-            route->push_back(east_egress_queues[pkt_coords[0]][pkt_coords[1]][VC0]);
-            route->push_back(eastbound_pipes[pkt_coords[0]][pkt_coords[1]][VC0]);
-        } else {
-            route->push_back(east_egress_queues[pkt_coords[0]][pkt_coords[1]][VC1]);
-            route->push_back(eastbound_pipes[pkt_coords[0]][pkt_coords[1]][VC1]);
-        }
+        bool this_hop_wraps = (pkt_coords[1] == _m - 1);
+        uint32_t vc = (has_wrapped_around || this_hop_wraps) ? 1 : 0;
 
-        // if (_switch_queue_type == LOSSLESS_INPUT || _switch_queue_type == LOSSLESS_INPUT_ECN) {
-        // Add matching lossless input queue (current queue's remote endpoint)
-        if (!has_wrapped_around) {
-            route->push_back(
-                east_egress_queues[pkt_coords[0]][pkt_coords[1]][VC0]->getRemoteEndpoint());
-        } else {
-            route->push_back(
-                east_egress_queues[pkt_coords[0]][pkt_coords[1]][VC1]->getRemoteEndpoint());
-        }
-        // }
+        // cout << "Using VC" << vc << endl;
+        // cout << "Add eastward route: (" << pkt_coords[1] << ", " << pkt_coords[0] << ")-->";
+        // Keep moving east, using wrap-around if necessary
+        route->push_back(east_egress_queues[pkt_coords[0]][pkt_coords[1]][vc]);
+        route->push_back(eastbound_pipes[pkt_coords[0]][pkt_coords[1]][vc]);
+        route->push_back(east_egress_queues[pkt_coords[0]][pkt_coords[1]][vc]->getRemoteEndpoint());
+
         // Increment x-coord with possible wrap-around
         if (pkt_coords[1] == _m - 1) {
             pkt_coords[1] = 0;
@@ -721,33 +893,23 @@ void TwoDimensionalTorusTopology::_add_eastward_route_to(Route* route,
         } else {
             pkt_coords[1]++;
         }
+        // cout << "(" << pkt_coords[1] << ", " << pkt_coords[0] << ")" << endl;
 
         if (reverse) {
             // Apply same logic but from dest to src, so reverse route
-            if (!rev_has_wrapped_around) {
-                reverse_route->push_back(
-                    west_egress_queues[reverse_pkt_coords[0]][reverse_pkt_coords[1]][VC0]);
-                reverse_route->push_back(
-                    westbound_pipes[reverse_pkt_coords[0]][reverse_pkt_coords[1]][VC0]);
-            } else {
-                reverse_route->push_back(
-                    west_egress_queues[reverse_pkt_coords[0]][reverse_pkt_coords[1]][VC1]);
-                reverse_route->push_back(
-                    westbound_pipes[reverse_pkt_coords[0]][reverse_pkt_coords[1]][VC1]);
-            }
+            bool this_hop_wraps = (reverse_pkt_coords[1] == 0);
+            uint32_t vc = (rev_has_wrapped_around || this_hop_wraps) ? 1 : 0;
 
-            // if (_switch_queue_type == LOSSLESS_INPUT || _switch_queue_type == LOSSLESS_INPUT_ECN)
-            // {
-            if (!rev_has_wrapped_around) {
-                reverse_route->push_back(
-                    west_egress_queues[reverse_pkt_coords[0]][reverse_pkt_coords[1]][VC0]
-                        ->getRemoteEndpoint());
-            } else {
-                reverse_route->push_back(
-                    west_egress_queues[reverse_pkt_coords[0]][reverse_pkt_coords[1]][VC1]
-                        ->getRemoteEndpoint());
-            }
-            // }
+            // cout << "Using VC" << vc << endl;
+            // cout << "Add reverse westward route: (" << reverse_pkt_coords[1] << ", "
+            // << reverse_pkt_coords[0] << ")-->";
+            reverse_route->push_back(
+                west_egress_queues[reverse_pkt_coords[0]][reverse_pkt_coords[1]][vc]);
+            reverse_route->push_back(
+                westbound_pipes[reverse_pkt_coords[0]][reverse_pkt_coords[1]][vc]);
+            reverse_route->push_back(
+                west_egress_queues[reverse_pkt_coords[0]][reverse_pkt_coords[1]][vc]
+                    ->getRemoteEndpoint());
 
             if (reverse_pkt_coords[1] == 0) {
                 reverse_pkt_coords[1] = _m - 1;
@@ -755,6 +917,7 @@ void TwoDimensionalTorusTopology::_add_eastward_route_to(Route* route,
             } else {
                 reverse_pkt_coords[1]--;
             }
+            // cout << "(" << pkt_coords[1] << ", " << pkt_coords[0] << ")" << endl;
         }
     }
 
@@ -762,11 +925,13 @@ void TwoDimensionalTorusTopology::_add_eastward_route_to(Route* route,
     if (pkt_coords[0] == dest_coords[0]) {
         route->push_back(switch_to_host_queues[dest_coords[0]][dest_coords[1]][dest_coords[2]]);
         route->push_back(switch_to_host_pipes[dest_coords[0]][dest_coords[1]][dest_coords[2]]);
+        // cout << "Route to destination host added" << endl;
         if (reverse) {
             reverse_route->push_back(
                 switch_to_host_queues[src_coords[0]][src_coords[1]][src_coords[2]]);
             reverse_route->push_back(
                 switch_to_host_pipes[src_coords[0]][src_coords[1]][src_coords[2]]);
+            // cout << "Reverse route to destination host added" << endl;
         }
     }
 
@@ -774,6 +939,7 @@ void TwoDimensionalTorusTopology::_add_eastward_route_to(Route* route,
         route->set_reverse(reverse_route);
         reverse_route->set_reverse(route);
     }
+    // cout << "Route created" << endl;
 }
 
 /*
@@ -791,40 +957,39 @@ void TwoDimensionalTorusTopology::_add_westward_route_to(Route* route,
     bool has_wrapped_around = false;
     bool rev_has_wrapped_around = false;
 
+    // cout << "-----------------" << endl;
+    // cout << "Printing westward path" << endl;
     Route* reverse_route = (reverse) ? new Route() : nullptr;
 
     // First push the host's egress queues into route to allow packets into switch.
     route->push_back(host_to_switch_queues[pkt_coords[0]][pkt_coords[1]][pkt_coords[2]]);
     route->push_back(host_to_switch_pipes[pkt_coords[0]][pkt_coords[1]][pkt_coords[2]]);
-    route->push_back(switches[pkt_coords[0]][pkt_coords[1]]);
+    route->push_back(
+        host_to_switch_queues[pkt_coords[0]][pkt_coords[1]][pkt_coords[2]]->getRemoteEndpoint());
+    // cout << "Host to switch route added" << endl;
+
     if (reverse) {
         reverse_route->push_back(host_to_switch_queues[reverse_pkt_coords[0]][reverse_pkt_coords[1]]
                                                       [reverse_pkt_coords[2]]);
         reverse_route->push_back(host_to_switch_pipes[reverse_pkt_coords[0]][reverse_pkt_coords[1]]
                                                      [reverse_pkt_coords[2]]);
-        reverse_route->push_back(switches[reverse_pkt_coords[0]][reverse_pkt_coords[1]]);
+        reverse_route->push_back(host_to_switch_queues[reverse_pkt_coords[0]][reverse_pkt_coords[1]]
+                                                      [reverse_pkt_coords[2]]
+                                                          ->getRemoteEndpoint());
+        // cout << "Reverse host to switch route added" << endl;
     }
 
     while (pkt_coords[1] != dest_coords[1]) {
-        // Keep moving west, using wrap-around if necessary
-        if (!has_wrapped_around) {
-            route->push_back(west_egress_queues[pkt_coords[0]][pkt_coords[1]][VC0]);
-            route->push_back(westbound_pipes[pkt_coords[0]][pkt_coords[1]][VC0]);
-        } else {
-            route->push_back(west_egress_queues[pkt_coords[0]][pkt_coords[1]][VC1]);
-            route->push_back(westbound_pipes[pkt_coords[0]][pkt_coords[1]][VC1]);
-        }
+        bool this_hop_wraps = (pkt_coords[1] == 0);
+        uint32_t vc = (has_wrapped_around || this_hop_wraps) ? 1 : 0;
 
-        // if (_switch_queue_type == LOSSLESS_INPUT || _switch_queue_type == LOSSLESS_INPUT_ECN) {
-        // Add matching lossless input queue (current queue's remote endpoint)
-        if (!has_wrapped_around) {
-            route->push_back(
-                west_egress_queues[pkt_coords[0]][pkt_coords[1]][VC0]->getRemoteEndpoint());
-        } else {
-            route->push_back(
-                west_egress_queues[pkt_coords[0]][pkt_coords[1]][VC1]->getRemoteEndpoint());
-        }
-        // }
+        // cout << "Using VC" << vc << endl;
+        // cout << "Add westward route: (" << pkt_coords[1] << ", " << pkt_coords[0] << ")-->";
+        // Keep moving west, using wrap-around if necessary
+        route->push_back(west_egress_queues[pkt_coords[0]][pkt_coords[1]][vc]);
+        route->push_back(westbound_pipes[pkt_coords[0]][pkt_coords[1]][vc]);
+        route->push_back(west_egress_queues[pkt_coords[0]][pkt_coords[1]][vc]->getRemoteEndpoint());
+
         // Decrement x-coord with possible wrap-around
         if (pkt_coords[1] == 0) {
             pkt_coords[1] = _m - 1;
@@ -832,40 +997,32 @@ void TwoDimensionalTorusTopology::_add_westward_route_to(Route* route,
         } else {
             pkt_coords[1]--;
         }
+        // cout << "(" << pkt_coords[1] << ", " << pkt_coords[0] << ")" << endl;
 
         if (reverse) {
             // Apply same logic but from dest to src, so reverse route
-            if (!rev_has_wrapped_around) {
-                reverse_route->push_back(
-                    east_egress_queues[reverse_pkt_coords[0]][reverse_pkt_coords[1]][VC0]);
-                reverse_route->push_back(
-                    eastbound_pipes[reverse_pkt_coords[0]][reverse_pkt_coords[1]][VC0]);
-            } else {
-                reverse_route->push_back(
-                    east_egress_queues[reverse_pkt_coords[0]][reverse_pkt_coords[1]][VC1]);
-                reverse_route->push_back(
-                    eastbound_pipes[reverse_pkt_coords[0]][reverse_pkt_coords[1]][VC1]);
-            }
+            bool this_hop_wraps = (reverse_pkt_coords[1] == _m - 1);
+            uint32_t vc = (rev_has_wrapped_around || this_hop_wraps) ? 1 : 0;
 
-            // if (_switch_queue_type == LOSSLESS_INPUT || _switch_queue_type == LOSSLESS_INPUT_ECN)
-            // {
-            if (!rev_has_wrapped_around) {
-                reverse_route->push_back(
-                    east_egress_queues[reverse_pkt_coords[0]][reverse_pkt_coords[1]][VC0]
-                        ->getRemoteEndpoint());
-            } else {
-                reverse_route->push_back(
-                    east_egress_queues[reverse_pkt_coords[0]][reverse_pkt_coords[1]][VC1]
-                        ->getRemoteEndpoint());
-            }
-            // }
+            // cout << "Using VC" << vc << endl;
+            // cout << "Add reverse eastward route: (" << reverse_pkt_coords[1] << ", "
+            //      << reverse_pkt_coords[0] << ")-->";
 
-            if (reverse_pkt_coords[1] == 0) {
-                reverse_pkt_coords[1] = _m - 1;
+            reverse_route->push_back(
+                east_egress_queues[reverse_pkt_coords[0]][reverse_pkt_coords[1]][vc]);
+            reverse_route->push_back(
+                eastbound_pipes[reverse_pkt_coords[0]][reverse_pkt_coords[1]][vc]);
+            reverse_route->push_back(
+                east_egress_queues[reverse_pkt_coords[0]][reverse_pkt_coords[1]][vc]
+                    ->getRemoteEndpoint());
+
+            if (reverse_pkt_coords[1] == _m - 1) {
+                reverse_pkt_coords[1] = 0;
                 rev_has_wrapped_around = true;
             } else {
-                reverse_pkt_coords[1]--;
+                reverse_pkt_coords[1]++;
             }
+            // cout << "(" << reverse_pkt_coords[1] << ", " << reverse_pkt_coords[0] << ")" << endl;
         }
     }
 
@@ -873,11 +1030,13 @@ void TwoDimensionalTorusTopology::_add_westward_route_to(Route* route,
     if (pkt_coords[0] == dest_coords[0]) {
         route->push_back(switch_to_host_queues[dest_coords[0]][dest_coords[1]][dest_coords[2]]);
         route->push_back(switch_to_host_pipes[dest_coords[0]][dest_coords[1]][dest_coords[2]]);
+        // cout << "Route to destination host added" << endl;
         if (reverse) {
             reverse_route->push_back(
                 switch_to_host_queues[src_coords[0]][src_coords[1]][src_coords[2]]);
             reverse_route->push_back(
                 switch_to_host_pipes[src_coords[0]][src_coords[1]][src_coords[2]]);
+            // cout << "Reverse route to destination host added" << endl;
         }
     }
 
@@ -906,9 +1065,14 @@ void TwoDimensionalTorusTopology::_add_northward_route_to(Route* route,
                                                           bool reverse) {
     vector<uint32_t> pkt_coords = src_coords;
     vector<uint32_t> reverse_pkt_coords = dest_coords;
+    // Update reverse pkt coords to reflect that reverse route has corrected X-dimension
+    reverse_pkt_coords[1] = src_coords[1];
+
     bool has_wrapped_around = false;
     bool rev_has_wrapped_around = false;
 
+    // cout << "-----------------" << endl;
+    // cout << "Printing northward path" << endl;
     Route* reverse_route = nullptr;
 
     if (reverse) {
@@ -919,10 +1083,12 @@ void TwoDimensionalTorusTopology::_add_northward_route_to(Route* route,
 
     // If route wasn't initialised because x == x', do it here by pushing packets from host to
     // switch
-    if (pkt_coords[1] == dest_coords[1]) {
+    if (route->size() == 0) {
         route->push_back(host_to_switch_queues[pkt_coords[0]][pkt_coords[1]][pkt_coords[2]]);
         route->push_back(host_to_switch_pipes[pkt_coords[0]][pkt_coords[1]][pkt_coords[2]]);
-        route->push_back(switches[pkt_coords[0]][pkt_coords[1]]);
+        route->push_back(host_to_switch_queues[pkt_coords[0]][pkt_coords[1]][pkt_coords[2]]
+                             ->getRemoteEndpoint());
+        // cout << "Host to switch route added" << endl;
         if (reverse) {
             reverse_route->push_back(
                 host_to_switch_queues[reverse_pkt_coords[0]][reverse_pkt_coords[1]]
@@ -930,28 +1096,25 @@ void TwoDimensionalTorusTopology::_add_northward_route_to(Route* route,
             reverse_route->push_back(
                 host_to_switch_pipes[reverse_pkt_coords[0]][reverse_pkt_coords[1]]
                                     [reverse_pkt_coords[2]]);
-            reverse_route->push_back(switches[reverse_pkt_coords[0]][reverse_pkt_coords[1]]);
+            reverse_route->push_back(
+                host_to_switch_queues[reverse_pkt_coords[0]][reverse_pkt_coords[1]]
+                                     [reverse_pkt_coords[2]]
+                                         ->getRemoteEndpoint());
+            // cout << "Reverse host to switch route added" << endl;
         }
     }
 
     while (pkt_coords[0] != dest_coords[0]) {
-        if (!has_wrapped_around) {
-            route->push_back(north_egress_queues[pkt_coords[0]][pkt_coords[1]][VC0]);
-            route->push_back(northbound_pipes[pkt_coords[0]][pkt_coords[1]][VC0]);
-        } else {
-            route->push_back(north_egress_queues[pkt_coords[0]][pkt_coords[1]][VC1]);
-            route->push_back(northbound_pipes[pkt_coords[0]][pkt_coords[1]][VC1]);
-        }
+        bool this_hop_wraps = (pkt_coords[0] == 0);
+        uint32_t vc = (has_wrapped_around || this_hop_wraps) ? 1 : 0;
 
-        // if (_switch_queue_type == LOSSLESS_INPUT || _switch_queue_type == LOSSLESS_INPUT_ECN) {
-        if (!has_wrapped_around) {
-            route->push_back(
-                north_egress_queues[pkt_coords[0]][pkt_coords[1]][VC0]->getRemoteEndpoint());
-        } else {
-            route->push_back(
-                north_egress_queues[pkt_coords[0]][pkt_coords[1]][VC1]->getRemoteEndpoint());
-        }
-        // }
+        // cout << "Using VC" << vc << endl;
+        // cout << "Add northward route: (" << pkt_coords[1] << ", " << pkt_coords[0] << ")-->";
+
+        route->push_back(north_egress_queues[pkt_coords[0]][pkt_coords[1]][vc]);
+        route->push_back(northbound_pipes[pkt_coords[0]][pkt_coords[1]][vc]);
+        route->push_back(
+            north_egress_queues[pkt_coords[0]][pkt_coords[1]][vc]->getRemoteEndpoint());
 
         if (pkt_coords[0] == 0) {
             pkt_coords[0] = _n - 1;
@@ -959,47 +1122,43 @@ void TwoDimensionalTorusTopology::_add_northward_route_to(Route* route,
         } else {
             pkt_coords[0]--;
         }
+        // cout << "(" << pkt_coords[1] << ", " << pkt_coords[0] << ")" << endl;
 
         if (reverse) {
-            if (!rev_has_wrapped_around) {
-                reverse_route->push_back(
-                    south_egress_queues[reverse_pkt_coords[0]][reverse_pkt_coords[1]][VC0]);
-                reverse_route->push_back(
-                    southbound_pipes[reverse_pkt_coords[0]][reverse_pkt_coords[1]][VC0]);
-            } else {
-                reverse_route->push_back(
-                    south_egress_queues[reverse_pkt_coords[0]][reverse_pkt_coords[1]][VC1]);
-                reverse_route->push_back(
-                    southbound_pipes[reverse_pkt_coords[0]][reverse_pkt_coords[1]][VC1]);
-            }
-            // if (_switch_queue_type == LOSSLESS_INPUT || _switch_queue_type == LOSSLESS_INPUT_ECN)
-            // {
-            if (!rev_has_wrapped_around) {
-                reverse_route->push_back(
-                    south_egress_queues[reverse_pkt_coords[0]][reverse_pkt_coords[1]][VC0]
-                        ->getRemoteEndpoint());
-            } else {
-                reverse_route->push_back(
-                    south_egress_queues[reverse_pkt_coords[0]][reverse_pkt_coords[1]][VC1]
-                        ->getRemoteEndpoint());
-            }
-            // }
+            bool this_hop_wraps = (reverse_pkt_coords[0] == _n - 1);
+            uint32_t vc = (rev_has_wrapped_around || this_hop_wraps) ? 1 : 0;
+
+            // cout << "Using VC" << vc << endl;
+            // cout << "Add reverse southward route: (" << reverse_pkt_coords[1] << ", "
+            //      << reverse_pkt_coords[0] << ")-->";
+
+            reverse_route->push_back(
+                south_egress_queues[reverse_pkt_coords[0]][reverse_pkt_coords[1]][vc]);
+            reverse_route->push_back(
+                southbound_pipes[reverse_pkt_coords[0]][reverse_pkt_coords[1]][vc]);
+            reverse_route->push_back(
+                south_egress_queues[reverse_pkt_coords[0]][reverse_pkt_coords[1]][vc]
+                    ->getRemoteEndpoint());
+
             if (reverse_pkt_coords[0] == _n - 1) {
                 reverse_pkt_coords[0] = 0;
                 rev_has_wrapped_around = true;
             } else {
                 reverse_pkt_coords[0]++;
             }
+            // cout << "(" << pkt_coords[1] << ", " << pkt_coords[0] << ")" << endl;
         }
     }
 
     // Dest is reached, so route packet from switch to host
     route->push_back(switch_to_host_queues[dest_coords[0]][dest_coords[1]][dest_coords[2]]);
     route->push_back(switch_to_host_pipes[dest_coords[0]][dest_coords[1]][dest_coords[2]]);
+    // cout << "Route to destination host added" << endl;
     if (reverse) {
         reverse_route->push_back(
             switch_to_host_queues[src_coords[0]][src_coords[1]][src_coords[2]]);
         reverse_route->push_back(switch_to_host_pipes[src_coords[0]][src_coords[1]][src_coords[2]]);
+        // cout << "Reverse route to destination host added" << endl;
     }
 
     // Overwrite reverse route to update
@@ -1017,9 +1176,14 @@ void TwoDimensionalTorusTopology::_add_southward_route_to(Route* route,
                                                           bool reverse) {
     vector<uint32_t> pkt_coords = src_coords;
     vector<uint32_t> reverse_pkt_coords = dest_coords;
+    // Update reverse pkt coords to reflect that reverse route has corrected X-dimension
+    reverse_pkt_coords[1] = src_coords[1];
+
     bool has_wrapped_around = false;
     bool rev_has_wrapped_around = false;
 
+    // cout << "-----------------" << endl;
+    // cout << "Printing southward path" << endl;
     Route* reverse_route = nullptr;
 
     if (reverse) {
@@ -1028,10 +1192,12 @@ void TwoDimensionalTorusTopology::_add_southward_route_to(Route* route,
 
     // If route wasn't initialised because x == x', do it here by pushing packets from host to
     // switch
-    if (pkt_coords[1] == dest_coords[1]) {
+    if (route->size() == 0) {
         route->push_back(host_to_switch_queues[pkt_coords[0]][pkt_coords[1]][pkt_coords[2]]);
         route->push_back(host_to_switch_pipes[pkt_coords[0]][pkt_coords[1]][pkt_coords[2]]);
-        route->push_back(switches[pkt_coords[0]][pkt_coords[1]]);
+        route->push_back(host_to_switch_queues[pkt_coords[0]][pkt_coords[1]][pkt_coords[2]]
+                             ->getRemoteEndpoint());
+        // cout << "Host to switch route added" << endl;
         if (reverse) {
             reverse_route->push_back(
                 host_to_switch_queues[reverse_pkt_coords[0]][reverse_pkt_coords[1]]
@@ -1039,77 +1205,69 @@ void TwoDimensionalTorusTopology::_add_southward_route_to(Route* route,
             reverse_route->push_back(
                 host_to_switch_pipes[reverse_pkt_coords[0]][reverse_pkt_coords[1]]
                                     [reverse_pkt_coords[2]]);
-            reverse_route->push_back(switches[reverse_pkt_coords[0]][reverse_pkt_coords[1]]);
+            reverse_route->push_back(
+                host_to_switch_queues[reverse_pkt_coords[0]][reverse_pkt_coords[1]]
+                                     [reverse_pkt_coords[2]]
+                                         ->getRemoteEndpoint());
+            // cout << "Reverse host to switch route added" << endl;
         }
     }
 
     while (pkt_coords[0] != dest_coords[0]) {
-        if (!has_wrapped_around) {
-            route->push_back(south_egress_queues[pkt_coords[0]][pkt_coords[1]][VC0]);
-            route->push_back(southbound_pipes[pkt_coords[0]][pkt_coords[1]][VC0]);
-        } else {
-            route->push_back(south_egress_queues[pkt_coords[0]][pkt_coords[1]][VC1]);
-            route->push_back(southbound_pipes[pkt_coords[0]][pkt_coords[1]][VC1]);
-        }
+        bool this_hop_wraps = (pkt_coords[0] == _n - 1);
+        uint32_t vc = (has_wrapped_around || this_hop_wraps) ? 1 : 0;
 
-        // if (_switch_queue_type == LOSSLESS_INPUT || _switch_queue_type == LOSSLESS_INPUT_ECN) {
-        if (!has_wrapped_around) {
-            route->push_back(
-                south_egress_queues[pkt_coords[0]][pkt_coords[1]][VC0]->getRemoteEndpoint());
+        // cout << "Using VC" << vc << endl;
+        // cout << "Add southward route: (" << pkt_coords[1] << ", " << pkt_coords[0] << ")-->";
 
-        } else {
-            route->push_back(
-                south_egress_queues[pkt_coords[0]][pkt_coords[1]][VC1]->getRemoteEndpoint());
-        }
-        // }
+        route->push_back(south_egress_queues[pkt_coords[0]][pkt_coords[1]][vc]);
+        route->push_back(southbound_pipes[pkt_coords[0]][pkt_coords[1]][vc]);
+        route->push_back(
+            south_egress_queues[pkt_coords[0]][pkt_coords[1]][vc]->getRemoteEndpoint());
+
         if (pkt_coords[0] == _n - 1) {
             pkt_coords[0] = 0;
             has_wrapped_around = true;
         } else {
             pkt_coords[0]++;
         }
+        // cout << "(" << pkt_coords[1] << ", " << pkt_coords[0] << ")" << endl;
 
         if (reverse) {
-            if (!rev_has_wrapped_around) {
-                reverse_route->push_back(
-                    north_egress_queues[reverse_pkt_coords[0]][reverse_pkt_coords[1]][VC0]);
-                reverse_route->push_back(
-                    northbound_pipes[reverse_pkt_coords[0]][reverse_pkt_coords[1]][VC0]);
-            } else {
-                reverse_route->push_back(
-                    north_egress_queues[reverse_pkt_coords[0]][reverse_pkt_coords[1]][VC1]);
-                reverse_route->push_back(
-                    northbound_pipes[reverse_pkt_coords[0]][reverse_pkt_coords[1]][VC1]);
-            }
+            bool this_hop_wraps = (reverse_pkt_coords[0] == 0);
+            uint32_t vc = (rev_has_wrapped_around || this_hop_wraps) ? 1 : 0;
 
-            // if (_switch_queue_type == LOSSLESS_INPUT || _switch_queue_type == LOSSLESS_INPUT_ECN)
-            // {
-            if (!rev_has_wrapped_around) {
-                reverse_route->push_back(
-                    north_egress_queues[reverse_pkt_coords[0]][reverse_pkt_coords[1]][VC0]
-                        ->getRemoteEndpoint());
-            } else {
-                reverse_route->push_back(
-                    north_egress_queues[reverse_pkt_coords[0]][reverse_pkt_coords[1]][VC1]
-                        ->getRemoteEndpoint());
-            }
-            // }
+            // cout << "Using VC" << vc << endl;
+            // cout << "Add reverse northward route: (" << reverse_pkt_coords[1] << ", "
+            //      << reverse_pkt_coords[0] << ")-->";
+
+            reverse_route->push_back(
+                north_egress_queues[reverse_pkt_coords[0]][reverse_pkt_coords[1]][vc]);
+            reverse_route->push_back(
+                northbound_pipes[reverse_pkt_coords[0]][reverse_pkt_coords[1]][vc]);
+            reverse_route->push_back(
+                north_egress_queues[reverse_pkt_coords[0]][reverse_pkt_coords[1]][vc]
+                    ->getRemoteEndpoint());
+
             if (reverse_pkt_coords[0] == 0) {
                 reverse_pkt_coords[0] = _n - 1;
                 rev_has_wrapped_around = true;
             } else {
                 reverse_pkt_coords[0]--;
             }
+            // cout << "(" << pkt_coords[1] << ", " << pkt_coords[0] << ")" << endl;
         }
     }
 
     // Dest is reached, so route packet from switch to host
     route->push_back(switch_to_host_queues[dest_coords[0]][dest_coords[1]][dest_coords[2]]);
     route->push_back(switch_to_host_pipes[dest_coords[0]][dest_coords[1]][dest_coords[2]]);
+    // cout << "Route to destination host added" << endl;
     if (reverse) {
         reverse_route->push_back(
             switch_to_host_queues[src_coords[0]][src_coords[1]][src_coords[2]]);
         reverse_route->push_back(switch_to_host_pipes[src_coords[0]][src_coords[1]][src_coords[2]]);
+        // cout << "Reverse route to destination host added" << endl;
     }
 
     if (reverse) {

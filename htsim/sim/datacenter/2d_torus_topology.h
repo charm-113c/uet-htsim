@@ -1,6 +1,6 @@
 // -*- c-basic-offset: 4; indent-tabs-mode: nil -*-
-#ifndef TWO_DIMENSIONAL_TORUS
-#define TWO_DIMENSIONAL_TORUS
+#ifndef TWO_DIMENSIONAL_TORUS_H
+#define TWO_DIMENSIONAL_TORUS_H
 #include <cmath>
 #include <cstdint>
 #include <unordered_map>
@@ -36,7 +36,7 @@ typedef enum {
     AEOLUS,
     AEOLUS_ECN
 } queue_type;
-#endif  //! QT
+#endif
 
 typedef struct {
     bool disable_trim;
@@ -63,7 +63,6 @@ typedef struct {
 class TwoDimensionalTorusTopology : public Topology {
 public:
     EventList* _eventlist;
-    Logfile* _logfile;
     QueueLoggerFactory* _q_logger_factory;
 
     //! n*m 2D vector of switches
@@ -75,6 +74,10 @@ public:
     vector<vector<vector<Queue*>>> switch_to_host_queues;
     vector<vector<vector<Pipe*>>> host_to_switch_pipes;
     vector<vector<vector<Pipe*>>> switch_to_host_pipes;
+    //! Ingress queue associated to host_to_switch_queues
+    vector<vector<vector<Queue*>>> switch_internal_ingress_queue;
+    // NOTE: switch_to_host_queues aren't associated an ingress queue from the host as the host is
+    // the packets' destination. Not sure why that's a good reason to not model buffers but alright.
 
     //! Switch-to-switch network
     //! 3D vector for Pipe: first 2D correspond to associated switch, 3rd dimension represents the
@@ -101,14 +104,12 @@ public:
     unordered_map<uint32_t, vector<uint32_t>> get_coords_of_host;
 
     //! Minimal constructor to set defaults, used to not bloat full constructor
-    TwoDimensionalTorusTopology(Logfile* logfile,
-                                QueueLoggerFactory* q_log_factory,
+    TwoDimensionalTorusTopology(QueueLoggerFactory* q_log_factory,
                                 uint32_t n,
                                 uint32_t m,
                                 bool is_constellation);
 
-    TwoDimensionalTorusTopology(Logfile* logfile,
-                                QueueLoggerFactory* q_log_factory,
+    TwoDimensionalTorusTopology(QueueLoggerFactory* q_log_factory,
                                 uint32_t n,
                                 uint32_t m,
                                 uint32_t hosts_per_switch,
@@ -127,17 +128,26 @@ public:
                                 uint32_t altitude,
                                 float_t inclination);
 
+    static TwoDimensionalTorusTopology* load(string filename,
+                                             EventList& eventlist,
+                                             QueueLoggerFactory* q_log_factory,
+                                             queue_type switch_q_type,
+                                             queue_type host_q_type);
+
     ~TwoDimensionalTorusTopology();
 
+    virtual vector<const Route*>* get_paths(uint32_t src, uint32_t dest) {
+        return get_bidir_paths(src, dest, true);
+    }
     virtual vector<const Route*>* get_bidir_paths(uint32_t src, uint32_t dest, bool reverse);
     virtual vector<uint32_t>* get_neighbours(uint32_t src);
+    virtual uint32_t no_of_nodes() const { return _n * _m * _hosts_per_switch; }
 
     inline uint32_t get_n() const { return _n; }
     inline uint32_t get_m() const { return _m; }
 
     virtual void add_switch_loggers(Logfile& log, simtime_picosec sample_period);
-    // NOTE: while Switches and Queues can be logged (see constructor for queues), the same isn't
-    // true for Pipes, likely since they represent links
+    // NOTE: While switches and queues log events themselves, pipes are logged by transport protocol
 
     void set_n_virtual_channels();
     void set_hosts_per_switch(uint32_t hosts_per_switch);
@@ -148,7 +158,7 @@ public:
                           uint16_t trim_size,
                           mem_b ecn_high,
                           mem_b ecn_low);
-    // TODO: create different linkspeeds for different components
+    // TODO: create different linkspeeds for different components?
     void set_linkspeed(linkspeed_bps linkspeed);
     void set_routing_strategy(torus_routing_strategy routing_strategy);
     void set_constellation_params(uint32_t altitude, float_t inclination);
@@ -158,7 +168,10 @@ public:
     //! Hosts (servers) may have multiple packet flows, so need to be allocated specific queue types
     Queue* alloc_host_queue(QueueLogger* queue_logger, linkspeed_bps linkspeed_bps);
     //! By contrast, switch's queues only care about receiving packets and forwarding them
-    Queue* alloc_queue(QueueLogger* queue_logger, linkspeed_bps linkspeed_bps, mem_b queue_size);
+    Queue* alloc_queue(QueueLogger* queue_logger,
+                       linkspeed_bps linkspeed_bps,
+                       mem_b queue_size,
+                       Switch* sw);
 
     simtime_picosec compute_average_interplane_latency_ps();
 
@@ -216,4 +229,4 @@ private:
                           bool);
 };
 
-#endif  //! TWO_DIMENSIONAL_TORUS
+#endif  //! TWO_DIMENSIONAL_TORUS_H
