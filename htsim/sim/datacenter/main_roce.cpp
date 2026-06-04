@@ -229,8 +229,9 @@ int main(int argc, char** argv) {
             cout << "tiers " << tiers << endl;
             assert(tiers == 2 || tiers == 3);
             i++;
+        }
 #ifdef TWO_DIMENSIONAL_TORUS
-        } else if (!strcmp(argv[i], "-torus__n_m_hps")) {
+        else if (!strcmp(argv[i], "-torus__n_m_hps")) {
             torus_n = atoi(argv[i + 1]);
             torus_m = atoi(argv[i + 2]);
             torus_host_per_switch = atoi(argv[i + 3]);
@@ -250,8 +251,10 @@ int main(int argc, char** argv) {
             } else {
                 torus_trim_size = atoi(argv[i + 1]);
             }
+            i++;
+        }
 #endif  // TWO_DIMENSIONAL_TORUS
-        } else if (!strcmp(argv[i], "-queue_type")) {
+        else if (!strcmp(argv[i], "-queue_type")) {
             if (!strcmp(argv[i + 1], "composite")) {
                 qt = COMPOSITE;
             } else if (!strcmp(argv[i + 1], "composite_ecn")) {
@@ -450,362 +453,376 @@ int main(int argc, char** argv) {
             } else if (!strcmp(argv[i + 1], "minimal")) {
                 route_strategy = MINIMAL;
                 DragonflyPlusSwitch::set_strategy(DragonflyPlusSwitch::MINIMAL);
-
+            }
 #elif defined TWO_DIMENSIONAL_TORUS
             else if (!strcmp(argv[i + 1], "dimension_order")) {
+                route_strategy = TORUS_DIMENSION_ORDER;
                 torus_routing_strategy = torus_routing_strategy::DIMENSION_ORDER;
                 TwoDimensionalTorusSwitch::set_strategy(torus_routing_strategy);
             } else if (!strcmp(argv[i + 1], "minimal_adaptive")) {
+                route_strategy = TORUS_MINIMAL_ADAPTIVE;
                 torus_routing_strategy = torus_routing_strategy::MINIMAL_ADAPTIVE_ALG;
                 TwoDimensionalTorusSwitch::set_strategy(torus_routing_strategy);
             }
 #endif
-                else {
-                    cout << "Unknown strategy " << argv[i + 1] << endl;
-                    exit_error(argv[0]);
-                }
-                i++;
-            } else {
-                cout << "Unknown parameter " << argv[i] << endl;
+            else {
+                cout << "Unknown strategy " << argv[i + 1] << endl;
                 exit_error(argv[0]);
             }
-
             i++;
-        }
-
-        srand(seed);
-        srandom(seed);
-
-        cout << "Parsed args\n";
-        Packet::set_packet_size(packet_size);
-
-        if (RoceSink::ooo_enabled) {
-            FatTreeSwitch::_ar_sticky = FatTreeSwitch::PER_PACKET;
         } else {
-            FatTreeSwitch::_ar_sticky = FatTreeSwitch::PER_FLOWLET;
-            FatTreeSwitch::_sticky_delta = timeFromUs(ar_sticky_delta);
+            cout << "Unknown parameter " << argv[i] << endl;
+            exit_error(argv[0]);
         }
 
-        LosslessInputQueue::_high_threshold = Packet::data_packet_size() * high_pfc;
-        LosslessInputQueue::_low_threshold = Packet::data_packet_size() * low_pfc;
+        i++;
+    }
 
-        if (dcqcn) {
-            LosslessOutputQueue::_ecn_enabled = true;
-            LosslessOutputQueue::_K = ecn_threshold * Packet::data_packet_size();
-        }
+    srand(seed);
+    srandom(seed);
 
-        eventlist.setEndtime(timeFromUs((uint32_t)end_time));
-        queuesize = memFromPkt(queuesize);
+    cout << "Parsed args\n";
+    Packet::set_packet_size(packet_size);
+
+    if (RoceSink::ooo_enabled) {
+        FatTreeSwitch::_ar_sticky = FatTreeSwitch::PER_PACKET;
+    } else {
+        FatTreeSwitch::_ar_sticky = FatTreeSwitch::PER_FLOWLET;
+        FatTreeSwitch::_sticky_delta = timeFromUs(ar_sticky_delta);
+    }
+
+    LosslessInputQueue::_high_threshold = Packet::data_packet_size() * high_pfc;
+    LosslessInputQueue::_low_threshold = Packet::data_packet_size() * low_pfc;
+
+    if (dcqcn) {
+        LosslessOutputQueue::_ecn_enabled = true;
+        LosslessOutputQueue::_K = ecn_threshold * Packet::data_packet_size();
+    }
+
+    eventlist.setEndtime(timeFromUs((uint32_t)end_time));
+    queuesize = memFromPkt(queuesize);
 
 #ifdef DRAGONFLY_PLUS
-        if (topo_type != SMALL) {
-            if (no_parallel_link != 1) {
-                fprintf(
-                    stderr,
+    if (topo_type != SMALL) {
+        if (no_parallel_link != 1) {
+            fprintf(stderr,
                     "It is not possible to change the number of parallel links if the Dragonfly+ "
                     "Topology is not small\n");
-                exit(1);
-            }
+            exit(1);
         }
+    }
 #endif
 
-        switch (route_strategy) {
+    switch (route_strategy) {
 #ifdef FAT_TREE
-            case ECMP_FIB:
-                break;
-            case SCATTER_ECMP:
-                if (path_entropy_size > 10000) {
-                    fprintf(stderr,
-                            "Route Strategy is ECMP.  Must specify path count using -paths\n");
-                    exit(1);
-                }
-                break;
-            case SINGLE_PATH:
-                if (path_entropy_size < 10000 && path_entropy_size > 1) {
-                    fprintf(stderr,
-                            "Route Strategy is SINGLE_PATH, but multiple paths are specifiec using "
-                            "-paths\n");
-                    exit(1);
-                }
-                break;
+        case ECMP_FIB:
+            break;
+        case SCATTER_ECMP:
+            if (path_entropy_size > 10000) {
+                fprintf(stderr, "Route Strategy is ECMP.  Must specify path count using -paths\n");
+                exit(1);
+            }
+            break;
+        case SINGLE_PATH:
+            if (path_entropy_size < 10000 && path_entropy_size > 1) {
+                fprintf(stderr,
+                        "Route Strategy is SINGLE_PATH, but multiple paths are specifiec using "
+                        "-paths\n");
+                exit(1);
+            }
+            break;
 #endif
 #ifdef DRAGONFLY_PLUS
-            case FPAR:
-            case MINIMAL:
-                break;
+        case FPAR:
+        case MINIMAL:
+            break;
 #endif
-            case NOT_SET:
-                fprintf(stderr,
-                        "Route Strategy not set.  Use the -strat param.  \nValid values are perm, "
-                        "rand, pull, rg and single\n");
-                exit(1);
-            default:
-                break;
-        }
+        case NOT_SET:
+            fprintf(stderr,
+                    "Route Strategy not set.  Use the -strat param.  \nValid values are perm, "
+                    "rand, pull, rg and single\n");
+            exit(1);
+        default:
+            break;
+    }
 
-        // prepare the loggers
+    // prepare the loggers
 
-        cout << "Logging to " << filename.str() << endl;
-        // Logfile
-        Logfile logfile(filename.str(), eventlist);
+    cout << "Logging to " << filename.str() << endl;
+    // Logfile
+    Logfile logfile(filename.str(), eventlist);
 
-        logfile.setStartTime(timeFromSec(0));
+    logfile.setStartTime(timeFromSec(0));
 
-        RoceSinkLoggerSampling sinkLogger = RoceSinkLoggerSampling(timeFromMs(logtime), eventlist);
-        if (log_sink) {
-            logfile.addLogger(sinkLogger);
-        }
-        RoceTrafficLogger traffic_logger = RoceTrafficLogger();
-        if (log_traffic) {
-            logfile.addLogger(traffic_logger);
-        }
+    RoceSinkLoggerSampling sinkLogger = RoceSinkLoggerSampling(timeFromMs(logtime), eventlist);
+    if (log_sink) {
+        logfile.addLogger(sinkLogger);
+    }
+    RoceTrafficLogger traffic_logger = RoceTrafficLogger();
+    if (log_traffic) {
+        logfile.addLogger(traffic_logger);
+    }
 
-        RoceSrc::setMinRTO(1000);  // increase RTO to avoid spurious retransmits
+    RoceSrc::setMinRTO(1000);  // increase RTO to avoid spurious retransmits
 
-        RoceSrc* roceSrc;
-        RoceSink* roceSnk;
+    RoceSrc* roceSrc;
+    RoceSink* roceSnk;
 
-        QueueLoggerFactory* qlf = 0;
-        if (log_tor_downqueue || log_tor_upqueue) {
-            qlf = new QueueLoggerFactory(&logfile, QueueLoggerFactory::LOGGER_SAMPLING, eventlist);
-            qlf->set_sample_period(timeFromUs(10.0));
-        } else if (log_queue_usage) {
-            qlf = new QueueLoggerFactory(&logfile, QueueLoggerFactory::LOGGER_EMPTY, eventlist);
-            qlf->set_sample_period(timeFromUs(10.0));
-        }
+    QueueLoggerFactory* qlf = 0;
+    if (log_tor_downqueue || log_tor_upqueue) {
+        qlf = new QueueLoggerFactory(&logfile, QueueLoggerFactory::LOGGER_SAMPLING, eventlist);
+        qlf->set_sample_period(timeFromUs(10.0));
+    } else if (log_queue_usage) {
+        qlf = new QueueLoggerFactory(&logfile, QueueLoggerFactory::LOGGER_EMPTY, eventlist);
+        qlf->set_sample_period(timeFromUs(10.0));
+    }
 
 #ifdef FAT_TREE
-        unique_ptr<FatTreeTopology> top;
-        unique_ptr<FatTreeTopologyCfg> topo_cfg;
-        if (topo_file) {
-            topo_cfg = FatTreeTopologyCfg::load(topo_file, queuesize, qt, snd_type);
+    unique_ptr<FatTreeTopology> top;
+    unique_ptr<FatTreeTopologyCfg> topo_cfg;
+    if (topo_file) {
+        topo_cfg = FatTreeTopologyCfg::load(topo_file, queuesize, qt, snd_type);
 
-            if (topo_cfg->no_of_nodes() != no_of_nodes) {
-                cerr << "Mismatch between connection matrix (" << no_of_nodes
-                     << " nodes) and topology (" << topo_cfg->no_of_nodes() << " nodes)" << endl;
-                exit(1);
-            }
-        } else {
-            topo_cfg = make_unique<FatTreeTopologyCfg>(tiers, no_of_nodes, linkspeed, queuesize,
-                                                       hop_latency, switch_latency, qt, snd_type);
+        if (topo_cfg->no_of_nodes() != no_of_nodes) {
+            cerr << "Mismatch between connection matrix (" << no_of_nodes
+                 << " nodes) and topology (" << topo_cfg->no_of_nodes() << " nodes)" << endl;
+            exit(1);
         }
+    } else {
+        topo_cfg = make_unique<FatTreeTopologyCfg>(tiers, no_of_nodes, linkspeed, queuesize,
+                                                   hop_latency, switch_latency, qt, snd_type);
+    }
 
-        if (topo_num_failed > 0) {
-            topo_cfg->set_failed_links(topo_num_failed);
-        }
+    if (topo_num_failed > 0) {
+        topo_cfg->set_failed_links(topo_num_failed);
+    }
 
-        top = make_unique<FatTreeTopology>(topo_cfg.get(), qlf, &eventlist, nullptr);
+    top = make_unique<FatTreeTopology>(topo_cfg.get(), qlf, &eventlist, nullptr);
 #endif
 
 #ifdef OV_FAT_TREE
-        OversubscribedFatTreeTopology* top = new OversubscribedFatTreeTopology(lf, &eventlist, ff);
+    OversubscribedFatTreeTopology* top = new OversubscribedFatTreeTopology(lf, &eventlist, ff);
 #endif
 
 #ifdef MH_FAT_TREE
-        MultihomedFatTreeTopology* top = new MultihomedFatTreeTopology(lf, &eventlist, ff);
+    MultihomedFatTreeTopology* top = new MultihomedFatTreeTopology(lf, &eventlist, ff);
 #endif
 
 #ifdef STAR
-        StarTopology* top = new StarTopology(lf, &eventlist, ff);
+    StarTopology* top = new StarTopology(lf, &eventlist, ff);
 #endif
 
 #ifdef BCUBE
-        BCubeTopology* top = new BCubeTopology(lf, &eventlist, ff);
-        cout << "BCUBE " << K << endl;
+    BCubeTopology* top = new BCubeTopology(lf, &eventlist, ff);
+    cout << "BCUBE " << K << endl;
 #endif
 
 #ifdef VL2
-        VL2Topology* top = new VL2Topology(lf, &eventlist, ff);
+    VL2Topology* top = new VL2Topology(lf, &eventlist, ff);
 #endif
 
 #ifdef DRAGONFLY_PLUS
-        DragonflyPlusTopology* top;
-        if (topo_file) {
-            top = DragonflyPlusTopology::load(topo_file, qlf, eventlist, queuesize, qt);
-        } else {
-            top = new DragonflyPlusTopology(k_radix, s_df, l_df, h_df, p_df, no_of_nodes, qt,
-                                            queuesize, qlf, &eventlist, topo_type,
-                                            queue_size_threshold, no_parallel_link, linkspeed,
-                                            hop_latency, switch_latency);
-        }
+    DragonflyPlusTopology* top;
+    if (topo_file) {
+        top = DragonflyPlusTopology::load(topo_file, qlf, eventlist, queuesize, qt);
+    } else {
+        top = new DragonflyPlusTopology(k_radix, s_df, l_df, h_df, p_df, no_of_nodes, qt, queuesize,
+                                        qlf, &eventlist, topo_type, queue_size_threshold,
+                                        no_parallel_link, linkspeed, hop_latency, switch_latency);
+    }
 #endif
 #ifdef TWO_DIMENSIONAL_TORUS
-        TwoDimensionalTorusTopology* top;
-        if (topo_file) {
-            top = TwoDimensionalTorusTopology::load(topo_file, eventlist, qlf, qt, snd_type);
-        } else {
-            top = new TwoDimensionalTorusTopology(
-                qlf, torus_n, torus_m, torus_host_per_switch, qt, snd_type, queuesize, linkspeed,
-                composite_queue_disable_trim, torus_trim_size, ecn_threshold, ecn_threshold,
-                torus_routing_strategy, torus_is_constellation, hop_latency, switch_latency,
-                torus_altitude_in_m, torus_inclination_in_deg);
-        }
+    TwoDimensionalTorusTopology* top;
+    if (topo_file) {
+        top = TwoDimensionalTorusTopology::load(topo_file, eventlist, qlf, qt, snd_type);
+    } else {
+        top = new TwoDimensionalTorusTopology(
+            qlf, torus_n, torus_m, torus_host_per_switch, qt, snd_type, queuesize, linkspeed,
+            composite_queue_disable_trim, torus_trim_size, ecn_threshold, ecn_threshold,
+            torus_routing_strategy, torus_is_constellation, hop_latency, switch_latency,
+            torus_altitude_in_m, torus_inclination_in_deg);
+    }
+    if (qt == LOSSLESS_INPUT_ECN || qt == LOSSLESS_INPUT) {
+        // Sample max queue size to set appropriate PAUSE/UNPAUSE thresholds
+        uint64_t qs = (top->north_egress_queues[0][0][0])->maxsize();
+        LosslessInputQueue::_high_threshold = (uint64_t)(0.7 * qs);
+        LosslessInputQueue::_low_threshold = (uint64_t)(0.3 * qs);
+    }
 
 #endif  // TWO_DIMENSIONAL_TORUS
 
-        if (log_switches) {
-            top->add_switch_loggers(logfile, timeFromUs(20.0));
+    if (log_switches) {
+        top->add_switch_loggers(logfile, timeFromUs(20.0));
+    }
+
+    vector<const Route*>*** net_paths;
+    net_paths = new vector<const Route*>**[no_of_nodes];
+
+    int** path_refcounts;
+    path_refcounts = new int*[no_of_nodes];
+
+    int* is_dest = new int[no_of_nodes];
+
+    for (size_t s = 0; s < no_of_nodes; s++) {
+        is_dest[s] = 0;
+        net_paths[s] = new vector<const Route*>*[no_of_nodes];
+        path_refcounts[s] = new int[no_of_nodes];
+        for (size_t d = 0; d < no_of_nodes; d++) {
+            net_paths[s][d] = NULL;
+            path_refcounts[s][d] = 0;
         }
+    }
 
-        vector<const Route*>*** net_paths;
-        net_paths = new vector<const Route*>**[no_of_nodes];
+    ConnectionMatrix* conns = new ConnectionMatrix(no_of_nodes);
 
-        int** path_refcounts;
-        path_refcounts = new int*[no_of_nodes];
+    if (tm_file) {
+        cout << "Loading connection matrix from  " << tm_file << endl;
 
-        int* is_dest = new int[no_of_nodes];
-
-        for (size_t s = 0; s < no_of_nodes; s++) {
-            is_dest[s] = 0;
-            net_paths[s] = new vector<const Route*>*[no_of_nodes];
-            path_refcounts[s] = new int[no_of_nodes];
-            for (size_t d = 0; d < no_of_nodes; d++) {
-                net_paths[s][d] = NULL;
-                path_refcounts[s][d] = 0;
-            }
-        }
-
-        ConnectionMatrix* conns = new ConnectionMatrix(no_of_nodes);
-
-        if (tm_file) {
-            cout << "Loading connection matrix from  " << tm_file << endl;
-
-            if (!conns->load(tm_file)) {
-                cout << "Error while loading connection matrix." << endl;
-                exit(-1);
-            }
-        } else {
-            cout << "Loading connection matrix from  standard input" << endl;
-            conns->load(cin);
-        }
-
-        if (conns->N != no_of_nodes) {
-            cout << "Connection matrix number of nodes is " << conns->N << " while I am using "
-                 << no_of_nodes << endl;
+        if (!conns->load(tm_file)) {
+            cout << "Error while loading connection matrix." << endl;
             exit(-1);
         }
+    } else {
+        cout << "Loading connection matrix from  standard input" << endl;
+        conns->load(cin);
+    }
 
-        vector<connection*>* all_conns;
+    if (conns->N != no_of_nodes) {
+        cout << "Connection matrix number of nodes is " << conns->N << " while I am using "
+             << no_of_nodes << endl;
+        exit(-1);
+    }
 
-        // used just to print out stats data at the end
-        // list <const Route*> routes;
+    vector<connection*>* all_conns;
 
-        all_conns = conns->getAllConnections();
-        vector<RoceSrc*> roce_srcs;
+    // used just to print out stats data at the end
+    // list <const Route*> routes;
 
-        for (size_t c = 0; c < all_conns->size(); c++) {
-            connection* crt = all_conns->at(c);
-            int src = crt->src;
-            int dest = crt->dst;
-            path_refcounts[src][dest]++;
-            path_refcounts[dest][src]++;
+    all_conns = conns->getAllConnections();
+    vector<RoceSrc*> roce_srcs;
+
+    for (size_t c = 0; c < all_conns->size(); c++) {
+        connection* crt = all_conns->at(c);
+        int src = crt->src;
+        int dest = crt->dst;
+        path_refcounts[src][dest]++;
+        path_refcounts[dest][src]++;
 
 #ifndef DRAGONFLY_PLUS
-            if (!net_paths[src][dest] && route_strategy != ECMP_FIB) {
-                vector<const Route*>* paths = top->get_bidir_paths(src, dest, false);
-                net_paths[src][dest] = paths;
-                /*
-                for (unsigned int i = 0; i < paths->size(); i++) {
-                routes.push_back((*paths)[i]);
-                }
-                */
+        if (!net_paths[src][dest] && route_strategy != ECMP_FIB) {
+            vector<const Route*>* paths = top->get_bidir_paths(src, dest, false);
+            net_paths[src][dest] = paths;
+            assert(!paths->empty());
+            /*
+            for (unsigned int i = 0; i < paths->size(); i++) {
+            routes.push_back((*paths)[i]);
             }
-            if (!net_paths[dest][src] && route_strategy != ECMP_FIB) {
-                vector<const Route*>* paths = top->get_bidir_paths(dest, src, false);
-                net_paths[dest][src] = paths;
-            }
+            */
+        }
+        if (!net_paths[dest][src] && route_strategy != ECMP_FIB) {
+            vector<const Route*>* paths = top->get_bidir_paths(dest, src, false);
+            net_paths[dest][src] = paths;
+            assert(!paths->empty());
+        }
 #endif
+    }
+
+    map<flowid_t, TriggerTarget*> flowmap;
+
+    for (size_t c = 0; c < all_conns->size(); c++) {
+        connection* crt = all_conns->at(c);
+        int src = crt->src;
+        int dest = crt->dst;
+        cout << "Connection " << crt->src << "->" << crt->dst << " starting at "
+             << timeAsUs(crt->start) << " size " << crt->size << endl;
+
+        if (dcqcn)
+            roceSrc = new DCQCNSrc(NULL, NULL, eventlist, linkspeed);
+        else
+            roceSrc = new RoceSrc(NULL, NULL, eventlist, linkspeed);
+
+        roce_srcs.push_back(roceSrc);
+        roceSrc->set_dst(dest);
+        roceSrc->set_src(src);
+
+        if (crt->size > 0) {
+            roceSrc->set_flowsize(crt->size);
         }
 
-        map<flowid_t, TriggerTarget*> flowmap;
+        if (crt->flowid) {
+            roceSrc->set_flowid(crt->flowid);
+            assert(flowmap.find(crt->flowid) == flowmap.end());  // don't have dups
+            flowmap[crt->flowid] = roceSrc;
+        }
 
-        for (size_t c = 0; c < all_conns->size(); c++) {
-            connection* crt = all_conns->at(c);
-            int src = crt->src;
-            int dest = crt->dst;
-            cout << "Connection " << crt->src << "->" << crt->dst << " starting at "
-                 << timeAsUs(crt->start) << " size " << crt->size << endl;
+        if (crt->trigger) {
+            Trigger* trig = conns->getTrigger(crt->trigger, eventlist);
+            trig->add_target(*roceSrc);
+        }
+        if (crt->send_done_trigger) {
+            Trigger* trig = conns->getTrigger(crt->send_done_trigger, eventlist);
+            roceSrc->set_end_trigger(*trig);
+        }
 
-            if (dcqcn)
-                roceSrc = new DCQCNSrc(NULL, NULL, eventlist, linkspeed);
-            else
-                roceSrc = new RoceSrc(NULL, NULL, eventlist, linkspeed);
+        if (dcqcn)
+            roceSnk = new DCQCNSink(eventlist);
+        else
+            roceSnk = new RoceSink();
 
-            roce_srcs.push_back(roceSrc);
-            roceSrc->set_dst(dest);
-            roceSrc->set_src(src);
+        roceSrc->setName("Roce_" + ntoa(src) + "_" + ntoa(dest));
 
-            if (crt->size > 0) {
-                roceSrc->set_flowsize(crt->size);
-            }
+        logfile.writeName(*roceSrc);
 
-            if (crt->flowid) {
-                roceSrc->set_flowid(crt->flowid);
-                assert(flowmap.find(crt->flowid) == flowmap.end());  // don't have dups
-                flowmap[crt->flowid] = roceSrc;
-            }
+        roceSnk->set_src(src);
+        roceSnk->set_dst(dest);
 
-            if (crt->trigger) {
-                Trigger* trig = conns->getTrigger(crt->trigger, eventlist);
-                trig->add_target(*roceSrc);
-            }
-            if (crt->send_done_trigger) {
-                Trigger* trig = conns->getTrigger(crt->send_done_trigger, eventlist);
-                roceSrc->set_end_trigger(*trig);
-            }
-
-            if (dcqcn)
-                roceSnk = new DCQCNSink(eventlist);
-            else
-                roceSnk = new RoceSink();
-
-            roceSrc->setName("Roce_" + ntoa(src) + "_" + ntoa(dest));
-
-            logfile.writeName(*roceSrc);
-
-            roceSnk->set_src(src);
-            roceSnk->set_dst(dest);
-
-            roceSnk->setName("Roce_sink_" + ntoa(src) + "_" + ntoa(dest));
-            logfile.writeName(*roceSnk);
+        roceSnk->setName("Roce_sink_" + ntoa(src) + "_" + ntoa(dest));
+        logfile.writeName(*roceSnk);
 
 #ifdef DRAGONFLY_PLUS
-            ((HostQueue*)top->queues_host_leaf[src][top->get_host_switch(src)])
-                ->addHostSender(roceSrc);
-            if (route_strategy != MINIMAL && route_strategy != FPAR) {
-                abort();
-            } else {
-                Route* srctotor = new Route();
-                srctotor->push_back(top->queues_host_leaf[src][top->get_host_switch(src)]);
-                srctotor->push_back(top->pipes_host_leaf[src][top->get_host_switch(src)]);
-                srctotor->push_back(
-                    top->queues_host_leaf[src][top->get_host_switch(src)]->getRemoteEndpoint());
+        ((HostQueue*)top->queues_host_leaf[src][top->get_host_switch(src)])->addHostSender(roceSrc);
+        if (route_strategy != MINIMAL && route_strategy != FPAR) {
+            abort();
+        } else {
+            Route* srctotor = new Route();
+            srctotor->push_back(top->queues_host_leaf[src][top->get_host_switch(src)]);
+            srctotor->push_back(top->pipes_host_leaf[src][top->get_host_switch(src)]);
+            srctotor->push_back(
+                top->queues_host_leaf[src][top->get_host_switch(src)]->getRemoteEndpoint());
 
-                Route* dsttotor = new Route();
-                dsttotor->push_back(top->queues_host_leaf[dest][top->get_host_switch(dest)]);
-                dsttotor->push_back(top->pipes_host_leaf[dest][top->get_host_switch(dest)]);
-                dsttotor->push_back(
-                    top->queues_host_leaf[dest][top->get_host_switch(dest)]->getRemoteEndpoint());
+            Route* dsttotor = new Route();
+            dsttotor->push_back(top->queues_host_leaf[dest][top->get_host_switch(dest)]);
+            dsttotor->push_back(top->pipes_host_leaf[dest][top->get_host_switch(dest)]);
+            dsttotor->push_back(
+                top->queues_host_leaf[dest][top->get_host_switch(dest)]->getRemoteEndpoint());
 
-                if (crt->start != TRIGGER_START && start_delta > 0) {
-                    crt->start += timeFromUs(drand48() * start_delta);
-                    cout << "Start is " << timeAsUs(crt->start) << endl;
-                }
-
-                roceSrc->connect(srctotor, dsttotor, *roceSnk, crt->start);
-                // register src and snk to receive packets from their respective TORs.
-                assert(top->switches_lf[top->get_host_switch(src)]);
-                assert(top->switches_lf[top->get_host_switch(src)]);
-                top->switches_lf[top->get_host_switch(src)]->addHostPort(src, roceSrc->flow_id(),
-                                                                         roceSrc);
-                top->switches_lf[top->get_host_switch(dest)]->addHostPort(dest, roceSrc->flow_id(),
-                                                                          roceSnk);
+            if (crt->start != TRIGGER_START && start_delta > 0) {
+                crt->start += timeFromUs(drand48() * start_delta);
+                cout << "Start is " << timeAsUs(crt->start) << endl;
             }
+
+            roceSrc->connect(srctotor, dsttotor, *roceSnk, crt->start);
+            // register src and snk to receive packets from their respective TORs.
+            assert(top->switches_lf[top->get_host_switch(src)]);
+            assert(top->switches_lf[top->get_host_switch(src)]);
+            top->switches_lf[top->get_host_switch(src)]->addHostPort(src, roceSrc->flow_id(),
+                                                                     roceSrc);
+            top->switches_lf[top->get_host_switch(dest)]->addHostPort(dest, roceSrc->flow_id(),
+                                                                      roceSnk);
+        }
 #elif defined TWO_DIMENSIONAL_TORUS
         vector<uint32_t> src_coords = top->get_coords_of_host[src];
         vector<uint32_t> dest_coords = top->get_coords_of_host[dest];
         ((HostQueue*)top->host_to_switch_queues[src_coords[0]][src_coords[1]][src_coords[2]])
             ->addHostSender(roceSrc);
+
+        // Store the newly created sink in switches' FIB so that packets can be properly routed to
+        // said sink
+        assert(top->switches[src_coords[0]][src_coords[1]]);
+        assert(top->switches[dest_coords[0]][dest_coords[1]]);
+        top->switches[src_coords[0]][src_coords[1]]->addHostPort(src, roceSrc->flow_id(), roceSrc);
+        top->switches[dest_coords[0]][dest_coords[1]]->addHostPort(dest, roceSrc->flow_id(),
+                                                                   roceSnk);
 
         if (torus_routing_strategy != DIMENSION_ORDER &&
             torus_routing_strategy != MINIMAL_ADAPTIVE_ALG) {
@@ -815,11 +832,16 @@ int main(int argc, char** argv) {
             Route *routeout, *routein;
             int choice = rand() % net_paths[src][dest]->size();
             routeout = new Route(*(net_paths[src][dest]->at(choice)));
-            routeout->add_endpoints(roceSrc, roceSnk);
+            // Push sink as get_bidir_paths did not have access to it
+            // NOTE: Actually, to ensure the correct sink is pushed, we now rely on the switch's
+            // updated FIB (from addHostPort) to route each packet. This is because each packet
+            // mustn't just reach its destination host, but it must also reach the host's sink with
+            // the matching flowid (a host has as many sinks as it has sources, and by
+            // extension, packet flows). routeout->add_endpoints(roceSrc, roceSnk);
 
             routein = new Route(*top->get_bidir_paths(dest, src, false)->at(choice));
-            routein->add_endpoints(roceSnk, roceSrc);
-            roceSrc->connect(routeout, routein, *roceSnk, timeFromUs((uint32_t)rand() % 20));
+            // routein->add_endpoints(roceSnk, roceSrc);
+            roceSrc->connect(routeout, routein, *roceSnk, timeFromUs((uint32_t)rand() % 100));
         } else if (torus_routing_strategy == MINIMAL_ADAPTIVE_ALG) {
             // Minimal adaptive decides next hop at every switch, so to start create route from
             // host to first switch
@@ -848,14 +870,6 @@ int main(int argc, char** argv) {
                 cout << "Start is " << timeAsUs(crt->start) << endl;
             }
             roceSrc->connect(src_host_to_switch, dest_host_to_switch, *roceSnk, crt->start);
-
-            // register src and snk to receive packets from their respective TORs.
-            assert(top->switches[src_coords[0]][src_coords[1]]);
-            assert(top->switches[dest_coords[0]][dest_coords[1]]);
-            top->switches[src_coords[0]][src_coords[1]]->addHostPort(src, roceSrc->flow_id(),
-                                                                     roceSrc);
-            top->switches[dest_coords[0]][dest_coords[1]]->addHostPort(dest, roceSrc->flow_id(),
-                                                                       roceSnk);
         }
 
 #elif defined FAT_TREE
@@ -904,95 +918,95 @@ int main(int argc, char** argv) {
         }
 #endif
 
-            path_refcounts[src][dest]--;
-            path_refcounts[dest][src]--;
+        path_refcounts[src][dest]--;
+        path_refcounts[dest][src]--;
 
-            // free up the routes if no other connection needs them
-            if (path_refcounts[src][dest] == 0 && net_paths[src][dest]) {
-                vector<const Route*>::iterator i;
-                for (i = net_paths[src][dest]->begin(); i != net_paths[src][dest]->end(); i++) {
-                    if ((*i)->reverse())
-                        delete (*i)->reverse();
-                    delete *i;
-                }
-                delete net_paths[src][dest];
+        // free up the routes if no other connection needs them
+        if (path_refcounts[src][dest] == 0 && net_paths[src][dest]) {
+            vector<const Route*>::iterator i;
+            for (i = net_paths[src][dest]->begin(); i != net_paths[src][dest]->end(); i++) {
+                if ((*i)->reverse())
+                    delete (*i)->reverse();
+                delete *i;
             }
-            if (path_refcounts[dest][src] == 0 && net_paths[dest][src]) {
-                vector<const Route*>::iterator i;
-                for (i = net_paths[dest][src]->begin(); i != net_paths[dest][src]->end(); i++) {
-                    if ((*i)->reverse())
-                        delete (*i)->reverse();
-                    delete *i;
-                }
-                delete net_paths[dest][src];
+            delete net_paths[src][dest];
+        }
+        if (path_refcounts[dest][src] == 0 && net_paths[dest][src]) {
+            vector<const Route*>::iterator i;
+            for (i = net_paths[dest][src]->begin(); i != net_paths[dest][src]->end(); i++) {
+                if ((*i)->reverse())
+                    delete (*i)->reverse();
+                delete *i;
             }
-
-            if (log_sink) {
-                sinkLogger.monitorSink(roceSnk);
-            }
+            delete net_paths[dest][src];
         }
 
-        for (size_t ix = 0; ix < no_of_nodes; ix++) {
-            delete path_refcounts[ix];
+        if (log_sink) {
+            sinkLogger.monitorSink(roceSnk);
         }
-
-        Logged::dump_idmap();
-        // Record the setup
-        int pktsize = Packet::data_packet_size();
-        logfile.write("# pktsize=" + ntoa(pktsize) + " bytes");
-        logfile.write("# hostnicrate = " + ntoa(linkspeed / 1000000) + " Mbps");
-        // logfile.write("# corelinkrate = " + ntoa(HOST_NIC*CORE_TO_HOST) + " pkt/sec");
-        // logfile.write("# buffer = " + ntoa((double) (queues_na_ni[0][1]->_maxsize) / ((double)
-        // pktsize)) + " pkt");
-        double rtt = timeAsSec(timeFromUs(RTT));
-        logfile.write("# rtt =" + ntoa(rtt));
-
-        // GO!
-        cout << "Starting simulation" << endl;
-        while (eventlist.doNextEvent()) {
-        }
-
-        cout << "Done" << endl;
-        int new_pkts = 0, rtx_pkts = 0;
-        for (size_t ix = 0; ix < roce_srcs.size(); ix++) {
-            new_pkts += roce_srcs[ix]->_new_packets_sent;
-            rtx_pkts += roce_srcs[ix]->_rtx_packets_sent;
-        }
-        cout << "New: " << new_pkts << " Rtx: " << rtx_pkts << endl;
-
-        /*list <const Route*>::iterator rt_i;
-          int counts[10]; int hop;
-          for (int i = 0; i < 10; i++)
-          counts[i] = 0;
-          for (rt_i = routes.begin(); rt_i != routes.end(); rt_i++) {
-          const Route* r = (*rt_i);
-          //print_route(*r);
-          #ifdef PRINTPATHS
-          cout << "Path:" << endl;
-          #endif
-          hop = 0;
-          for (int i = 0; i < r->size(); i++) {
-          PacketSink *ps = r->at(i);
-          CompositeQueue *q = dynamic_cast<CompositeQueue*>(ps);
-          if (q == 0) {
-          #ifdef PRINTPATHS
-          cout << ps->nodename() << endl;
-          #endif
-          } else {
-          #ifdef PRINTPATHS
-          cout << q->nodename() << " id=" << q->id << " " << q->num_packets() << "pkts "
-                         << q->num_headers() << "hdrs " << q->num_acks() << "acks " <<
-        q->num_nacks() << "nacks " << q->num_stripped() << "stripped"
-                         << endl;
-        #endif
-                    counts[hop] += q->num_stripped();
-                    hop++;
-                }
-            }
-        #ifdef PRINTPATHS
-            cout << endl;
-        #endif
-        }
-        for (int i = 0; i < 10; i++)
-        cout << "Hop " << i << " Count " << counts[i] << endl;*/
     }
+
+    for (size_t ix = 0; ix < no_of_nodes; ix++) {
+        delete path_refcounts[ix];
+    }
+
+    Logged::dump_idmap();
+    // Record the setup
+    int pktsize = Packet::data_packet_size();
+    logfile.write("# pktsize=" + ntoa(pktsize) + " bytes");
+    logfile.write("# hostnicrate = " + ntoa(linkspeed / 1000000) + " Mbps");
+    // logfile.write("# corelinkrate = " + ntoa(HOST_NIC*CORE_TO_HOST) + " pkt/sec");
+    // logfile.write("# buffer = " + ntoa((double) (queues_na_ni[0][1]->_maxsize) / ((double)
+    // pktsize)) + " pkt");
+    double rtt = timeAsSec(timeFromUs(RTT));
+    logfile.write("# rtt =" + ntoa(rtt));
+
+    // GO!
+    cout << "Starting simulation" << endl;
+    while (eventlist.doNextEvent()) {
+    }
+
+    cout << "Done" << endl;
+    int new_pkts = 0, rtx_pkts = 0;
+    for (size_t ix = 0; ix < roce_srcs.size(); ix++) {
+        new_pkts += roce_srcs[ix]->_new_packets_sent;
+        rtx_pkts += roce_srcs[ix]->_rtx_packets_sent;
+    }
+    cout << "New: " << new_pkts << " Rtx: " << rtx_pkts << endl;
+
+    /*list <const Route*>::iterator rt_i;
+      int counts[10]; int hop;
+      for (int i = 0; i < 10; i++)
+      counts[i] = 0;
+      for (rt_i = routes.begin(); rt_i != routes.end(); rt_i++) {
+      const Route* r = (*rt_i);
+      //print_route(*r);
+      #ifdef PRINTPATHS
+      cout << "Path:" << endl;
+      #endif
+      hop = 0;
+      for (int i = 0; i < r->size(); i++) {
+      PacketSink *ps = r->at(i);
+      CompositeQueue *q = dynamic_cast<CompositeQueue*>(ps);
+      if (q == 0) {
+      #ifdef PRINTPATHS
+      cout << ps->nodename() << endl;
+      #endif
+      } else {
+      #ifdef PRINTPATHS
+      cout << q->nodename() << " id=" << q->id << " " << q->num_packets() << "pkts "
+                     << q->num_headers() << "hdrs " << q->num_acks() << "acks " <<
+    q->num_nacks() << "nacks " << q->num_stripped() << "stripped"
+                     << endl;
+    #endif
+                counts[hop] += q->num_stripped();
+                hop++;
+            }
+        }
+    #ifdef PRINTPATHS
+        cout << endl;
+    #endif
+    }
+    for (int i = 0; i < 10; i++)
+    cout << "Hop " << i << " Count " << counts[i] << endl;*/
+}

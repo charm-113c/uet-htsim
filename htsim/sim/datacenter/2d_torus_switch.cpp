@@ -1,8 +1,11 @@
 // -*- c-basic-offset: 4; indent-tabs-mode: nil -*-
 
 #include "2d_torus_switch.h"
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
+#include <iostream>
+#include <unordered_map>
 #include <vector>
 #include "2d_torus_topology.h"
 #include "config.h"
@@ -29,15 +32,6 @@ TwoDimensionalTorusSwitch::TwoDimensionalTorusSwitch(EventList* eventlist,
 }
 
 void TwoDimensionalTorusSwitch::receivePacket(Packet& pkt) {
-    // cout << "-----------------------------------------------------" << endl;
-    // vector<uint32_t> coords = _torus->get_coords_of_switch[_id];
-    // cout << "x=" << coords[1] << ", y=" << coords[0] << endl;
-    // cout << "Packet src_host=" << pkt.src() << ", dest_host=" << pkt.dst() << endl;
-    // vector<uint32_t> pkt_coords = _torus->get_coords_of_host[pkt.src()];
-    // vector<uint32_t> dest_coords = _torus->get_coords_of_host[pkt.dst()];
-    // cout << "src_x=" << pkt_coords[1] << ", src_y=" << pkt_coords[0] << endl;
-    // cout << "dst_x=" << dest_coords[1] << ", dst_y=" << dest_coords[0] << endl;
-    //
     if (pkt.type() == ETH_PAUSE) {
         // In lossless mode
         EthPausePacket* eth_pkt = (EthPausePacket*)&pkt;
@@ -54,11 +48,41 @@ void TwoDimensionalTorusSwitch::receivePacket(Packet& pkt) {
         }
         return;
     }
+    // cout << "-----------------------------------------------------" << endl;
+    // vector<uint32_t> coords = _torus->get_coords_of_switch[_id];
+    // cout << "Packet currently at switch x=" << coords[1] << ", y=" << coords[0] << endl;
+    // cout << "Packet src_host=" << pkt.src() << ", dest_host=" << pkt.dst() << endl;
+    // vector<uint32_t> pkt_coords = _torus->get_coords_of_host[pkt.src()];
+    // vector<uint32_t> dest_coords = _torus->get_coords_of_host[pkt.dst()];
+    // cout << "src_x=" << pkt_coords[1] << ", src_y=" << pkt_coords[0] << endl;
+    // cout << "dst_x=" << dest_coords[1] << ", dst_y=" << dest_coords[0] << endl;
 
     if (TwoDimensionalTorusSwitch::_routing_strategy == DIMENSION_ORDER) {
         // Fully deterministic routing algorithm, so since pkt's route is fully written in pkt by
         // transport protocol using get_bidir_paths, switch only serves to forward it: no route
         // modifications necessary.
+        // NOTE: This now changes, in light of how packets need to be routed to the correct sink
+        // within the host.
+        // So now, determine if the packet is at its destination switch, and if so, add the route to
+        // the correct host, and then the correct sink
+
+        vector<uint32_t> pkt_target_coords = _torus->get_coords_of_host[pkt.dst()];
+        vector<uint32_t> switch_coords = _torus->get_coords_of_switch[_id];
+        if (switch_coords[0] == pkt_target_coords[0] && switch_coords[1] == pkt_target_coords[1]) {
+            Route* last_hop = new Route();
+            last_hop->push_back(_torus->switch_to_host_queues[switch_coords[0]][switch_coords[1]]
+                                                             [pkt_target_coords[2]]);
+            last_hop->push_back(_torus->switch_to_host_pipes[switch_coords[0]][switch_coords[1]]
+                                                            [pkt_target_coords[2]]);
+            last_hop->push_back(getHostPort(pkt.dst(), pkt.flow_id()));
+
+            assert(last_hop);
+            pkt.set_route(last_hop);
+            // cout << "Packet from flow " << pkt.flow_id() << " received route to destination sink"
+            //      << endl;
+            // cout << "Next hop: " << pkt.nexthop() << ", route_size: " << last_hop->size() <<
+            // endl;
+        }
     } else {
         Route* next_hop = getNextHop(pkt);
         // WARNING: Possible memory leak as old route is dereferenced, set_route should delete old
@@ -96,10 +120,10 @@ Route* TwoDimensionalTorusSwitch::getNextHop(Packet& pkt) {
         uint32_t n = _torus->get_n();
         uint32_t m = _torus->get_m();
         uint32_t vc = 0;
-        cout << "------------------------------------------------" << endl;
-        cout << "Routing packet " << pkt.id() << " from src=" << pkt.src()
-             << " to dest=" << pkt.dst() << endl;
-        cout << "Current position: x=" << pkt_coords[1] << ", src_y=" << pkt_coords[0] << endl;
+        // cout << "------------------------------------------------" << endl;
+        // cout << "Routing packet " << pkt.id() << " from src=" << pkt.src()
+        //      << " to dest=" << pkt.dst() << endl;
+        // cout << "Current position: x=" << pkt_coords[1] << ", src_y=" << pkt_coords[0] << endl;
 
         // First, construct route out of host and into switch if still at src
         // Actually, transport should take care of that: it's responsible for sending a packet from
@@ -196,15 +220,36 @@ Route* TwoDimensionalTorusSwitch::getNextHop(Packet& pkt) {
                                         ->getRemoteEndpoint());
             }
             // -----------------------
-
         } else {
-            // If at destination, add switch to host routing
+            // Else packet has reached its destination switch. The final route from switch to
+            // destination host is saved in _host_fib.
             next_hop->push_back(
                 _torus->switch_to_host_queues[dest_coords[0]][dest_coords[1]][dest_coords[2]]);
             next_hop->push_back(
                 _torus->switch_to_host_pipes[dest_coords[0]][dest_coords[1]][dest_coords[2]]);
+
+            PacketSink* last_hop = getHostPort(pkt.dst(), pkt.flow_id());
+            next_hop->push_back(last_hop);
         }
     }
 
     return next_hop;
+}
+
+// A packet's destination is a sink created by the transport protocol. Since those sinks can only be
+// created by the protocol before a simulation is run, we create this method to allow adding the
+// sink to the packet's route.
+// In particular, this method saves which sink is associated to which destination host (and more
+// precisely, to which packet flow of the destination host).
+void TwoDimensionalTorusSwitch::addHostPort(int addr, int flowid, PacketSink* transport_port) {
+    if (_host_fib.find(addr) == _host_fib.end())
+        _host_fib[addr] = new unordered_map<int, PacketSink*>();
+
+    (*_host_fib[addr])[flowid] = transport_port;
+}
+
+PacketSink* TwoDimensionalTorusSwitch::getHostPort(int addr, int flowid) {
+    PacketSink* sink = (*_host_fib[addr])[flowid];
+    assert(sink);
+    return sink;
 }

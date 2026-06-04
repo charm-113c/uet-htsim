@@ -7,8 +7,8 @@
 #include "network.h"
 #include "switch.h"
 
-uint64_t LosslessInputQueue::_high_threshold = Packet::data_packet_size() * 1500;
-uint64_t LosslessInputQueue::_low_threshold = Packet::data_packet_size() * 1000;
+uint64_t LosslessInputQueue::_high_threshold = 1500 * 1800;
+uint64_t LosslessInputQueue::_low_threshold = 1500 * 1500;
 
 LosslessInputQueue::LosslessInputQueue(EventList& eventlist)
     : Queue(speedFromGbps(1), Packet::data_packet_size() * 2000, eventlist, NULL),
@@ -76,7 +76,7 @@ void LosslessInputQueue::receivePacket(Packet& pkt) {
     // ") "<< " recv when paused pkt " << pkt.type() << " sz " << _queuesize << endl;
 
     if (_queuesize > _maxsize) {
-        cout << "Packet src_host=" << pkt.src() << ", dest_host=" << pkt.dst() << endl;
+        // cout << "Packet src_host=" << pkt.src() << ", dest_host=" << pkt.dst() << endl;
         cout << " Queue " << _name << " LOSSLESS not working! I should have dropped this packet"
              << _queuesize / Packet::data_packet_size() << endl;
     }
@@ -89,6 +89,8 @@ void LosslessInputQueue::receivePacket(Packet& pkt) {
     } else {
         assert(_switch);
         pkt.set_ingress_queue(this);
+        // cout << "Packet from flow " << pkt.flow_id() << " being sent to switch "
+        //      << _switch->get_id() << endl;
         _switch->receivePacket(pkt);
     }
 }

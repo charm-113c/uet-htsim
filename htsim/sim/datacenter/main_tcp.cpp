@@ -35,7 +35,7 @@
 #ifdef TWO_DIMENSIONAL_TORUS
 #include "2d_torus_switch.h"
 #include "2d_torus_topology.h"
-
+#include "queue_lossless_input.h"
 #else
 #include "fat_tree_topology.h"
 
@@ -230,6 +230,12 @@ int main(int argc, char** argv) {
 #ifdef TWO_DIMENSIONAL_TORUS
     TwoDimensionalTorusTopology* top =
         TwoDimensionalTorusTopology::load(top_cfg_file, eventlist, &qlf, switch_qt, host_qt);
+    if (switch_qt == LOSSLESS_INPUT_ECN || switch_qt == LOSSLESS_INPUT) {
+        // Sample max queue size to set appropriate PAUSE/UNPAUSE thresholds
+        uint64_t qs = (top->north_egress_queues[0][0][0])->maxsize();
+        LosslessInputQueue::_high_threshold = (uint64_t)(0.8 * qs);
+        LosslessInputQueue::_low_threshold = (uint64_t)(0.5 * qs);
+    }
 #endif
 
     no_of_nodes = top->no_of_nodes();

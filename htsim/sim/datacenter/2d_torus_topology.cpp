@@ -402,10 +402,10 @@ TwoDimensionalTorusTopology* TwoDimensionalTorusTopology::load(string filename,
                 disable_trim = (tokens[1] == "true") ? true : false;
             else if (tokens[0] == "is_constellation")
                 is_constellation = (tokens[1] == "true") ? true : false;
-            else if (tokens[0] == "latency_ns")
-                latency = timeFromNs(stoi(tokens[1]));
-            else if (tokens[0] == "host_switch_latency_ns")
-                host_switch_latency = timeFromNs(stoi(tokens[1]));
+            else if (tokens[0] == "latency_us")
+                latency = timeFromUs((uint32_t)stoi(tokens[1]));
+            else if (tokens[0] == "host_switch_latency_us")
+                host_switch_latency = timeFromUs((uint32_t)stoi(tokens[1]));
             else if (tokens[0] == "routing_strategy")
                 routing_strategy =
                     (tokens[1] == "dimension_order") ? DIMENSION_ORDER : MINIMAL_ADAPTIVE_ALG;
@@ -922,18 +922,19 @@ void TwoDimensionalTorusTopology::_add_eastward_route_to(Route* route,
     }
 
     // If dest is reached, route packet from switch to host
-    if (pkt_coords[0] == dest_coords[0]) {
-        route->push_back(switch_to_host_queues[dest_coords[0]][dest_coords[1]][dest_coords[2]]);
-        route->push_back(switch_to_host_pipes[dest_coords[0]][dest_coords[1]][dest_coords[2]]);
-        // cout << "Route to destination host added" << endl;
-        if (reverse) {
-            reverse_route->push_back(
-                switch_to_host_queues[src_coords[0]][src_coords[1]][src_coords[2]]);
-            reverse_route->push_back(
-                switch_to_host_pipes[src_coords[0]][src_coords[1]][src_coords[2]]);
-            // cout << "Reverse route to destination host added" << endl;
-        }
-    }
+    // if (pkt_coords[0] == dest_coords[0]) {
+    //     route->push_back(switch_to_host_queues[dest_coords[0]][dest_coords[1]][dest_coords[2]]);
+    //     route->push_back(switch_to_host_pipes[dest_coords[0]][dest_coords[1]][dest_coords[2]]);
+    //     // cout << "Route to destination host added" << endl;
+    //     if (reverse) {
+    //         reverse_route->push_back(
+    //             switch_to_host_queues[src_coords[0]][src_coords[1]][src_coords[2]]);
+    //         reverse_route->push_back(
+    //             switch_to_host_pipes[src_coords[0]][src_coords[1]][src_coords[2]]);
+    //         // cout << "Reverse route to destination host added" << endl;
+    //     }
+    // }
+    // NOTE: This last piece of routing is now left to TwoDimensionalTorusSwitch::receivePacket()
 
     if (reverse) {
         route->set_reverse(reverse_route);
@@ -1027,18 +1028,19 @@ void TwoDimensionalTorusTopology::_add_westward_route_to(Route* route,
     }
 
     // If dest is reached, route packet from switch to host
-    if (pkt_coords[0] == dest_coords[0]) {
-        route->push_back(switch_to_host_queues[dest_coords[0]][dest_coords[1]][dest_coords[2]]);
-        route->push_back(switch_to_host_pipes[dest_coords[0]][dest_coords[1]][dest_coords[2]]);
-        // cout << "Route to destination host added" << endl;
-        if (reverse) {
-            reverse_route->push_back(
-                switch_to_host_queues[src_coords[0]][src_coords[1]][src_coords[2]]);
-            reverse_route->push_back(
-                switch_to_host_pipes[src_coords[0]][src_coords[1]][src_coords[2]]);
-            // cout << "Reverse route to destination host added" << endl;
-        }
-    }
+    // if (pkt_coords[0] == dest_coords[0]) {
+    //     route->push_back(switch_to_host_queues[dest_coords[0]][dest_coords[1]][dest_coords[2]]);
+    //     route->push_back(switch_to_host_pipes[dest_coords[0]][dest_coords[1]][dest_coords[2]]);
+    //     // cout << "Route to destination host added" << endl;
+    //     if (reverse) {
+    //         reverse_route->push_back(
+    //             switch_to_host_queues[src_coords[0]][src_coords[1]][src_coords[2]]);
+    //         reverse_route->push_back(
+    //             switch_to_host_pipes[src_coords[0]][src_coords[1]][src_coords[2]]);
+    //         // cout << "Reverse route to destination host added" << endl;
+    //     }
+    // }
+    // NOTE: This last piece of routing is now left to TwoDimensionalTorusSwitch::receivePacket()
 
     if (reverse) {
         route->set_reverse(reverse_route);
@@ -1151,15 +1153,16 @@ void TwoDimensionalTorusTopology::_add_northward_route_to(Route* route,
     }
 
     // Dest is reached, so route packet from switch to host
-    route->push_back(switch_to_host_queues[dest_coords[0]][dest_coords[1]][dest_coords[2]]);
-    route->push_back(switch_to_host_pipes[dest_coords[0]][dest_coords[1]][dest_coords[2]]);
-    // cout << "Route to destination host added" << endl;
-    if (reverse) {
-        reverse_route->push_back(
-            switch_to_host_queues[src_coords[0]][src_coords[1]][src_coords[2]]);
-        reverse_route->push_back(switch_to_host_pipes[src_coords[0]][src_coords[1]][src_coords[2]]);
-        // cout << "Reverse route to destination host added" << endl;
-    }
+    // route->push_back(switch_to_host_queues[dest_coords[0]][dest_coords[1]][dest_coords[2]]);
+    // route->push_back(switch_to_host_pipes[dest_coords[0]][dest_coords[1]][dest_coords[2]]);
+    // // cout << "Route to destination host added" << endl;
+    // if (reverse) {
+    //     reverse_route->push_back(
+    //         switch_to_host_queues[src_coords[0]][src_coords[1]][src_coords[2]]);
+    //     reverse_route->push_back(switch_to_host_pipes[src_coords[0]][src_coords[1]][src_coords[2]]);
+    //     // cout << "Reverse route to destination host added" << endl;
+    // }
+    // NOTE: This last piece of routing is now left to TwoDimensionalTorusSwitch::receivePacket()
 
     // Overwrite reverse route to update
     if (reverse) {
@@ -1260,15 +1263,16 @@ void TwoDimensionalTorusTopology::_add_southward_route_to(Route* route,
     }
 
     // Dest is reached, so route packet from switch to host
-    route->push_back(switch_to_host_queues[dest_coords[0]][dest_coords[1]][dest_coords[2]]);
-    route->push_back(switch_to_host_pipes[dest_coords[0]][dest_coords[1]][dest_coords[2]]);
-    // cout << "Route to destination host added" << endl;
-    if (reverse) {
-        reverse_route->push_back(
-            switch_to_host_queues[src_coords[0]][src_coords[1]][src_coords[2]]);
-        reverse_route->push_back(switch_to_host_pipes[src_coords[0]][src_coords[1]][src_coords[2]]);
-        // cout << "Reverse route to destination host added" << endl;
-    }
+    // route->push_back(switch_to_host_queues[dest_coords[0]][dest_coords[1]][dest_coords[2]]);
+    // route->push_back(switch_to_host_pipes[dest_coords[0]][dest_coords[1]][dest_coords[2]]);
+    // // cout << "Route to destination host added" << endl;
+    // if (reverse) {
+    //     reverse_route->push_back(
+    //         switch_to_host_queues[src_coords[0]][src_coords[1]][src_coords[2]]);
+    //     reverse_route->push_back(switch_to_host_pipes[src_coords[0]][src_coords[1]][src_coords[2]]);
+    //     // cout << "Reverse route to destination host added" << endl;
+    // }
+    // NOTE: This last piece of routing is now left to TwoDimensionalTorusSwitch::receivePacket()
 
     if (reverse) {
         delete route->reverse();
