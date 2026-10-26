@@ -127,6 +127,13 @@ set(SOURCE_FILES
     uecpacket.cpp
     uec_mp.cpp
     uec_pdcses.cpp
+    inc_composite_queue.cpp
+    incpacket.cpp
+    uec_inc_src.cpp
+    logsim-interface.cpp
+    compute_event.cpp
+    null_event.cpp
+    atlahs_htsim_api.cpp
 )
 
 # Create static library

@@ -21,6 +21,7 @@ using namespace std;
 #define LOGSINK   0 
 bool RoceSink::ooo_enabled = false;
 
+
 /* keep track of RTOs.  Generally, we shouldn't see RTOs if
    return-to-sender is enabled.  Otherwise we'll see them with very
    large incasts. */
@@ -465,6 +466,8 @@ void RoceSink::send_ack(simtime_picosec ts) {
     if (_log_me)
         cout << "Sink " << get_id() << " sending ack " << _cumulative_ack << endl;
     ack->set_pathid(0);
+
+
     ack->sendOn();
 }
 
@@ -478,6 +481,7 @@ void RoceSink::send_nack(simtime_picosec ts, RocePacket::seq_t ackno) {
     assert(nack);
     nack->flow().logTraffic(*nack,*this,TrafficLogger::PKT_CREATE);
     nack->set_ts(ts);
+
     nack->sendOn();
 }
 

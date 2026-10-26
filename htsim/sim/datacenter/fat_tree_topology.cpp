@@ -514,7 +514,7 @@ void FatTreeTopologyCfg::set_params(uint32_t no_of_nodes) {
     _hosts_per_pod = _no_of_nodes / NPOD;
 }
 
-simtime_picosec FatTreeTopologyCfg::get_two_point_diameter_latency(int src, int dst) {
+simtime_picosec FatTreeTopologyCfg::get_two_point_diameter_latency(int src, int dst) const{
     simtime_picosec diameter_latency_end_point = 0;
     simtime_picosec one_hop_delay = 0;
     if(_link_latencies[TOR_TIER] == 0){
@@ -913,12 +913,12 @@ FatTreeTopology::FatTreeTopology(const FatTreeTopologyCfg* cfg,
 
                 if (_cfg->_tiers == 2 && (agg - agg_min) < _cfg->_num_failed_links){
                     queues_nup_nlp[agg][tor][b] = alloc_queue(queueLogger, _cfg->_downlink_speeds[AGG_TIER],_cfg->_queue_down[AGG_TIER], DOWNLINK, AGG_TIER,false,true);
-                    cout << "Failure: US" + ntoa(agg) + "->LS_" + ntoa(tor) + "(" + ntoa(b) + ") linkspeed set to " << speedAsGbps(_cfg->_downlink_speeds[AGG_TIER] * _cfg->_failed_link_ratio) << endl;
+                    cout << "Failure: US" + ntoa(agg) + "->LS" + ntoa(tor) + "(" + ntoa(b) + ") linkspeed set to " << speedAsGbps(_cfg->_downlink_speeds[AGG_TIER] * _cfg->_failed_link_ratio) << endl;
                 }
                 else
                     queues_nup_nlp[agg][tor][b] = alloc_queue((QueueLogger*)queueLogger, (const mem_b)_cfg->_queue_down[AGG_TIER], DOWNLINK, AGG_TIER);
 
-                queues_nup_nlp[agg][tor][b]->setName("US" + ntoa(agg) + "->LS_" + ntoa(tor) + "(" + ntoa(b) + ")");
+                queues_nup_nlp[agg][tor][b]->setName("US" + ntoa(agg) + "->LS" + ntoa(tor) + "(" + ntoa(b) + ")");
                 //if (logfile) logfile->writeName(*(queues_nup_nlp[agg][tor]));
             
                 simtime_picosec hop_latency = (_cfg->_hop_latency == 0) ? _cfg->_link_latencies[AGG_TIER] : _cfg->_hop_latency;

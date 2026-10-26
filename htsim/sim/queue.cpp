@@ -6,6 +6,7 @@
 #include "queue_lossless.h"
 
 simtime_picosec BaseQueue::_update_period = timeFromUs(0.1);
+int BaseQueue::_log_packet_enabled = false;
 
 // base queue is a generic queue that we can log, but doesn't actually store anything
 BaseQueue::BaseQueue(linkspeed_bps bitrate, EventList& eventlist, QueueLogger* logger)
@@ -145,6 +146,23 @@ Queue::completeService()
     Packet* pkt = _enqueued.pop();
     _queuesize -= pkt->size();
     pkt->flow().logTraffic(*pkt, *this, TrafficLogger::PKT_DEPART);
+
+    if (_log_packet_enabled){
+        // Parse the nodename
+        string nodename = pkt->route()->at(0)->nodename();
+        string parsed_nodename;
+        bool write = false;
+        for(char c : nodename) {
+            if(!write) {
+                if(c == ')') write = true;
+                continue;
+            }
+            parsed_nodename += c;
+        }
+
+        new LoggedPacket(parsed_nodename,std::to_string(timeAsUs(eventlist().now())),std::to_string(pkt->size()), std::to_string(drainTime(pkt)));
+    }
+
     if (_logger) _logger->logQueue(*this, QueueLogger::PKT_SERVICE, *pkt);
 
     //used to compute queue utilization
@@ -342,6 +360,23 @@ PriorityQueue::completeService()
         _queue[_servicing].pop_back();
         _queuesize[_servicing] -= pkt->size();
         pkt->flow().logTraffic(*pkt, *this, TrafficLogger::PKT_DEPART);
+
+        if (_log_packet_enabled){
+            // Parse the nodename
+            string nodename = pkt->route()->at(0)->nodename();
+            string parsed_nodename;
+            bool write = false;
+            for(char c : nodename) {
+                if(!write) {
+                    if(c == ')') write = true;
+                    continue;
+                }
+                parsed_nodename += c;
+            }
+
+            new LoggedPacket(parsed_nodename,std::to_string(timeAsUs(eventlist().now())),std::to_string(pkt->size()), std::to_string(drainTime(pkt)));
+        }
+
         if (_logger) _logger->logQueue(*this, QueueLogger::PKT_SERVICE, *pkt);
 
         /* tell the packet to move on to the next pipe */
@@ -529,6 +564,23 @@ FairPriorityQueue::completeService()
         _sending = NULL;
 
         pkt->flow().logTraffic(*pkt, *this, TrafficLogger::PKT_DEPART);
+
+        if (_log_packet_enabled){
+            // Parse the nodename
+            string nodename = pkt->route()->at(0)->nodename();
+            string parsed_nodename;
+            bool write = false;
+            for(char c : nodename) {
+                if(!write) {
+                    if(c == ')') write = true;
+                    continue;
+                }
+                parsed_nodename += c;
+            }
+
+            new LoggedPacket(parsed_nodename,std::to_string(timeAsUs(eventlist().now())),std::to_string(pkt->size()), std::to_string(drainTime(pkt)));
+        }
+
         if (_logger) _logger->logQueue(*this, QueueLogger::PKT_SERVICE, *pkt);
 
         /* tell the packet to move on to the next pipe */
