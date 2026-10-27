@@ -613,7 +613,7 @@ void UecSrc::connectPort(uint32_t port_num,
         _flow._name = _name;
 
         if (start_time != TRIGGER_START) {
-            eventlist().sourceIsPending(*this, timeFromUs((uint32_t)start_time));
+            eventlist().sourceIsPending(*this, start_time); // eventlist().sourceIsPending(*this, timeFromUs((uint32_t)start_time));
         }
     }
     assert(_sink == &sink);
@@ -837,6 +837,17 @@ bool UecSrc::checkFinished(UecDataPacket::seq_t cum_ack) {
                     << endl;
                 cancelRTO();
                 _done_sending = true;
+
+                // ATLAHS 
+                EventOver *flow_over = new EventOver(from, to, _flow_size, tag, eventlist().now(), AtlahsEventType::SEND_EVENT_OVER);
+                flow_over->node = lgs_node;
+                flow_over->start_time_event = _flow_start_time;
+                if (_atlahs_api) {
+                    if (_atlahs_api->print_stats_flows) {
+                        _atlahs_api->flowInfos.push_back(FlowInfo(timeAsUs(_flow_start_time), timeAsUs(eventlist().now()), timeAsUs(eventlist().now() - _flow_start_time), _flow_size, 1, _cwnd));
+                    }
+                    _atlahs_api->EventFinished(*flow_over);
+                }
             }
         } else {
             if ((((int64_t)cum_ack - _stats.rts_pkts_sent) * _mss) >= (int64_t)_flow_size) {
@@ -863,6 +874,16 @@ bool UecSrc::checkFinished(UecDataPacket::seq_t cum_ack) {
                     _flow_logger->logEvent(_flow, *this, FlowEventLogger::FINISH, _flow_size, cum_ack);
                 }
                 cancelRTO();
+                // ATLAHS 
+                EventOver *flow_over = new EventOver(from, to, _flow_size, tag, eventlist().now(), AtlahsEventType::SEND_EVENT_OVER);
+                flow_over->node = lgs_node;
+                flow_over->start_time_event = _flow_start_time;
+                if (_atlahs_api) {
+                    if (_atlahs_api->print_stats_flows) {
+                        _atlahs_api->flowInfos.push_back(FlowInfo(timeAsUs(_flow_start_time), timeAsUs(eventlist().now()), timeAsUs(eventlist().now() - _flow_start_time), _flow_size, 1, _cwnd));
+                    }
+                    _atlahs_api->EventFinished(*flow_over);
+                }
                 _done_sending = true;
             }
         }
@@ -1387,6 +1408,7 @@ void UecSrc::dontUpdateCwndOnNack(bool skip, mem_b nacked_bytes, bool last_hop) 
 }
 
 void UecSrc::update_base_rtt(simtime_picosec raw_rtt){
+    if (_dstaddr == UINT32_MAX) return;
     if (_base_rtt > raw_rtt) {
         _base_rtt = raw_rtt;
         _bdp = timeAsUs(raw_rtt) * _nic.linkspeed() / 8000000; 
@@ -3168,5 +3190,3 @@ void UecPullPacer::requestPull(UecSink* sink) {
         _active = true;
     }
 }
-
-

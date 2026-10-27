@@ -16,13 +16,15 @@
 #include "pciemodel.h"
 #include "oversubscribed_cc.h"
 #include "uec_mp.h"
+#include "atlahs_event.h"
+#include "atlahs_htsim_api.h"
 
 #define timeInf 0
 // min RTO bound in us
 //  *** don't change this default - override it by calling UecSrc::setMinRTO()
 #define DEFAULT_UEC_RTO_MIN 100
 
-static const unsigned uecMaxInFlightPkts = 1 << 14;
+static const unsigned uecMaxInFlightPkts = 1 << 16;
 class UecPullPacer;
 class UecSink;
 class UecSrc;
@@ -65,7 +67,7 @@ public:
     virtual const string& nodename() const {return _nodename;}
     list<UecSrc*> _active_srcs;
 
-private:
+protected:
     void sendControlPktNow();
     uint32_t sendOnFreePortNow(simtime_picosec endtime, const Route* rt);
     list<struct CtrlPacket> _control;
@@ -149,9 +151,9 @@ public:
     virtual void connectPort(uint32_t portnum, Route& routeout, Route& routeback, UecSink& sink, simtime_picosec start);
     const Route* getPortRoute(uint32_t port_num) const {return _ports[port_num]->route();}
     UecSrcPort* getPort(uint32_t port_num) {return _ports[port_num];}
-    void timeToSend(const Route& route);
-    void receivePacket(Packet& pkt, uint32_t portnum);
-    void doNextEvent();
+    virtual void timeToSend(const Route& route);
+    virtual void receivePacket(Packet& pkt, uint32_t portnum);
+    virtual void doNextEvent();
     uint32_t dst() { return _dstaddr; }
     void setDst(uint32_t dst) { _dstaddr = dst; }
 
@@ -236,7 +238,7 @@ public:
     bool _debug_src;
     bool debug() const { return _debug_src; }
 
-   private:
+   protected:
     unique_ptr<UecMultipath> _mp;
     UecNIC& _nic;
     uint32_t _no_of_ports;
@@ -264,8 +266,8 @@ public:
     bool isSendPermitted();
     void sendIfPermitted();
     mem_b sendPacket(const Route& route);
-    mem_b sendNewPacket(const Route& route);
-    mem_b sendRtxPacket(const Route& route);
+    virtual mem_b sendNewPacket(const Route& route);
+    virtual mem_b sendRtxPacket(const Route& route);
     void sendRTS();
     void sendProbe();
     void createSendRecord(UecDataPacket::seq_t seqno, mem_b pkt_size);
@@ -373,7 +375,38 @@ public:
     static simtime_picosec _adjust_period_threshold;
     //debug
     static flowid_t _debug_flowid;
-private:
+
+    // ATLAHS
+    AtlahsHtsimApi *_atlahs_api = nullptr;
+    graph_node_properties *lgs_node; // used for logging purposes
+    uint64_t send_size = 0;
+    uint32_t from = -1;
+    uint32_t to = -1;
+    uint32_t tag;
+    uint64_t lgs_time;
+    uint64_t lgs_starttime;         // only used for MSGs to identify start times
+    uint64_t lgs_syncstart;
+
+    uint64_t lgs_ts; /* this is a timestamp that determines the (original) insertion order of 
+                  elements in the queue, it is increased for every new element, not for 
+                  re-insertions! Needed for correctness. */
+    uint64_t lgs_size;						// number of bytes to send, recv, or time to spend in loclop
+    uint32_t lgs_target;					// partner for send/recv
+    uint32_t lgs_host;            // owning host 
+    uint32_t lgs_offset;          // for Parser (to identify schedule element)
+    uint32_t lgs_tag;							// tag for send/recv
+    uint32_t lgs_handle;          // handle for network layer :-/
+    uint8_t lgs_proc;							// processing element for this operation
+    uint8_t lgs_nic;							// network interface for this operation
+    char lgs_type;							  // see below
+    void setFlowSize(uint64_t flow_size) { _flow_size = flow_size; }
+    void set_dst(uint32_t dst) { _dstaddr = dst; }
+    void setSrc(uint32_t src) { _srcaddr = src; }
+    uint32_t             _srcaddr;
+    simtime_picosec last_data_sent_time;
+    simtime_picosec _flow_start_time;
+
+protected:
     bool quick_adapt(bool is_loss, bool skip, simtime_picosec delay);
     void fair_increase(uint32_t newly_acked_bytes);
     void proportional_increase(uint32_t newly_acked_bytes,simtime_picosec delay);
@@ -564,6 +597,35 @@ class UecSink : public DataReceiver {
     uint32_t reorder_buffer_size();  // count is in packets
 
     inline UecPullPacer* pullPacer() const {return _pullPacer;}
+
+    // ATLAHS
+    AtlahsHtsimApi *_atlahs_api = nullptr;
+    graph_node_properties *lgs_node; // used for logging purposes
+    uint64_t send_size = 0;
+    uint32_t from_sink = -1;
+    uint32_t to_sink = -1;
+    uint32_t tag_sink;
+    uint64_t lgs_time;
+    uint64_t lgs_starttime;         // only used for MSGs to identify start times
+    uint64_t lgs_syncstart;
+
+    uint64_t lgs_ts; /* this is a timestamp that determines the (original) insertion order of 
+                  elements in the queue, it is increased for every new element, not for 
+                  re-insertions! Needed for correctness. */
+    uint64_t lgs_size;						// number of bytes to send, recv, or time to spend in loclop
+    uint32_t lgs_target;					// partner for send/recv
+    uint32_t lgs_host;            // owning host 
+    uint32_t lgs_offset;          // for Parser (to identify schedule element)
+    uint32_t lgs_tag;							// tag for send/recv
+    uint32_t lgs_handle;          // handle for network layer :-/
+    uint8_t lgs_proc;							// processing element for this operation
+    uint8_t lgs_nic;							// network interface for this operation
+    char lgs_type;							  // see below
+    //void setFlowSize(uint64_t flow_size) { _flow_size = flow_size; }
+    //void set_dst(uint32_t dst) { _dstaddr = dst; }
+    simtime_picosec last_data_sent_time;
+    void set_src(uint32_t s) { _srcaddr = s; }
+
 
    private:
     uint32_t _no_of_ports;

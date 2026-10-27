@@ -66,6 +66,7 @@ class BaseQueue  : public EventSource, public PacketSink, public Drawable {
     virtual uint8_t quantized_utilization();
 
     static simtime_picosec _update_period;
+    static int _log_packet_enabled;
 
 protected:
     // Housekeeping

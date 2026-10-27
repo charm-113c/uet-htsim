@@ -60,6 +60,23 @@ ECNPrioQueue::completeService(){
     _num_packets++;
     
     pkt->flow().logTraffic(*pkt,*this,TrafficLogger::PKT_DEPART);
+
+    if (_log_packet_enabled){
+        // Parse the nodename
+        string nodename = pkt->route()->at(0)->nodename();
+        string parsed_nodename;
+        bool write = false;
+        for(char c : nodename) {
+            if(!write) {
+                if(c == ')') write = true;
+                continue;
+            }
+            parsed_nodename += c;
+        }
+
+        new LoggedPacket(parsed_nodename,std::to_string(timeAsUs(eventlist().now())),std::to_string(pkt->size()), std::to_string(drainTime(pkt)));
+    }
+
     if (_logger) _logger->logQueue(*this, QueueLogger::PKT_SERVICE, *pkt);
 
     if (_ecn) {
