@@ -22,7 +22,7 @@
 #include "topology.h"
 #include "connection_matrix.h"
 //#include "vl2_topology.h"
-#include "fat_tree_topology.h"
+// #include "fat_tree_topology.h"
 //#include "oversubscribed_fat_tree_topology.h"
 //#include "multihomed_fat_tree_topology.h"
 //#include "star_topology.h"
@@ -34,8 +34,8 @@
 #include "2d_torus_switch.h"
 #include "2d_torus_topology.h"
 #include "queue_lossless_input.h"
-// #else
-// #include "fat_tree_topology.h"
+#else
+#include "fat_tree_topology.h"
 #endif  // TWO_DIMENSIONAL_TORUS
 
 // Simulation params

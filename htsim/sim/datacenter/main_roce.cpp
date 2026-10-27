@@ -424,7 +424,7 @@ int main(int argc, char **argv) {
                 DragonflyPlusSwitch::set_strategy(DragonflyPlusSwitch::MINIMAL);
             }
 #elif defined TWO_DIMENSIONAL_TORUS
-            else if (!strcmp(argv[i + 1], "dimension_order")) {
+            if (!strcmp(argv[i + 1], "dimension_order")) {
                 route_strategy = TORUS_DIMENSION_ORDER;
                 torus_routing_strategy = torus_routing_strategy::DIMENSION_ORDER;
                 TwoDimensionalTorusSwitch::set_strategy(torus_routing_strategy);
